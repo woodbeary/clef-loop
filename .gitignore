@@ -1,0 +1,13 @@
+node_modules
+dist/
+.wrangler/
+.dev.vars
+# Real decisions and reports stay local, even after redaction.
+data/
+out/
+reports/
+adapters/
+byom/weights/
+__pycache__/
+*.pyc
+*.log

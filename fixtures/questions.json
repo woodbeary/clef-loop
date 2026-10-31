@@ -1,0 +1,11 @@
+{
+  "decision": {
+    "type": "choice",
+    "instructions": "Should we take this lead?",
+    "criteria": {
+      "accept": "Book it: inside our service area, a job we do, and enough detail to quote.",
+      "skip": "Decline: too far, hazardous materials, or not worth the trip.",
+      "needs_info": "Ask for photos or details before deciding."
+    }
+  }
+}

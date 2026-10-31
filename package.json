@@ -1,0 +1,23 @@
+{
+  "name": "clef-loop",
+  "version": "0.1.0",
+  "description": "Capture labeled decisions, redact PII, build Clef and Workers AI LoRA datasets, evaluate base vs tuned vs frontier, and canary the tuned model on Cloudflare with automatic fallback.",
+  "license": "MIT",
+  "author": "Jacob Lopez",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json",
+    "fixtures": "node scripts/make-fixtures.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261014.1",
+    "@types/node": "22.20.5",
+    "typescript": "6.0.3",
+    "wrangler": "4.151.0"
+  }
+}

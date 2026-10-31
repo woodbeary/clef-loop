@@ -1,0 +1,20 @@
+{
+  "model": "clef-flash",
+  "state": {
+    "service": "garage cleanout",
+    "estimated_load": "half truck",
+    "distance_miles": 8.5,
+    "photos_attached": true
+  },
+  "questions": {
+    "decision": {
+      "type": "choice",
+      "instructions": "Should we take this lead?",
+      "criteria": {
+        "accept": "Book it: inside our service area, a job we do, and enough detail to quote.",
+        "skip": "Decline: too far, hazardous materials, or not worth the trip.",
+        "needs_info": "Ask for photos or details before deciding."
+      }
+    }
+  }
+}
