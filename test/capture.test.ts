@@ -123,5 +123,6 @@ describe("log body helpers", () => {
     assert.deepEqual(systemOneInput({ input: { state: 1, questions: {} } }), { state: 1, questions: {} });
     assert.deepEqual(systemOneInput({ state: 1, questions: {} }), { state: 1, questions: {} });
     assert.throws(() => systemOneInput({ messages: [] }), /no state or questions/);
+    assert.throws(() => systemOneInput({ prompt: "<s>[INST] ... [/INST]", raw: true, lora: "leads-v1" }), /no state or questions/);
   });
 });

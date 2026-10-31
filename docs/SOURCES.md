@@ -10,6 +10,7 @@ page and open an issue.
 | --- | --- |
 | [Clef-flash model page](https://developers.cloudflare.com/workers-ai/models/clef-flash/) and its [input](https://developers.cloudflare.com/workers-ai/models/clef-flash/schema-input.json) / [output](https://developers.cloudflare.com/workers-ai/models/clef-flash/schema-output.json) schemas | The System One request (`model`, `state`, `questions`) and response (`answers`, `usage`). The limits in `src/schema.ts`: 1-64 questions, id pattern, 2-255 choice options, 2-10 score levels. The selector values `clef` and `clef-flash`. |
 | [Clef model page](https://developers.cloudflare.com/workers-ai/models/clef/) | `@cf/cloudflare/clef`, same API. |
+| [Clef-omni model page](https://developers.cloudflare.com/workers-ai/models/clef-omni/) | `@cf/cloudflare/clef-omni`, same API, with its own selector `clef-omni`. |
 | [Changelog, 2026-10-01](https://developers.cloudflare.com/changelog/post/2026-10-01-clef-workers-ai/) | Clef runs through the Workers AI binding or `/ai/run`, and works with AI Gateway. Fine-tuning is offered as an RL service with design partners. |
 | [Launch post](https://blog.cloudflare.com/clef-decision-models/) | The intended loop: capture with AI Gateway, fine-tune, redeploy with "Workers AI + BYO Model", built on BYOM (Cog). Fine-tuning starts as a hands-on service with Cloudflare's FDE team. Clef trains a joint head with rank-256 adapters on a frozen Qwen backbone. |
 | [Clef-flash on Hugging Face](https://huggingface.co/Cloudflare/clef-flash) | Open weights (Apache 2.0), Qwen3.5-9B backbone, `joint_schema_model.py` with `load_release_model` and `systemone`, tested with torch 2.11 and transformers 5.10.2, and SGLang serving `/v1/systemone`. Used by `byom/predict.py` and the `systemone-url` arm. |
@@ -38,12 +39,12 @@ page and open an issue.
 | [Custom metadata](https://developers.cloudflare.com/ai-gateway/observability/custom-metadata/) | Up to five entries per request, with string, number or boolean values. The `cf-aig-metadata` header. Keys starting with `cf.` are reserved. |
 | [Add human feedback using the API](https://developers.cloudflare.com/ai-gateway/evaluations/add-human-feedback-api/) | `GET .../ai-gateway/gateways/{id}/logs` and `PATCH .../logs/{id}`, `feedback` of 1 or -1, and log ids that are opaque strings (UUIDv7 or ULID). |
 | [Logs API reference](https://developers.cloudflare.com/api/resources/ai_gateway/subresources/logs/) | `per_page` up to 50, `order_by`, and the `/logs/{id}/request` and `/logs/{id}/response` endpoints. Their bodies are typed `unknown`. Used by `src/capture.ts`. |
-| [Logging](https://developers.cloudflare.com/ai-gateway/observability/logging/) | Logs are on by default. `cf-aig-collect-log` and `cf-aig-collect-log-payload` turn them off per request. Gateways created on or after 2026-09-24 follow Workers Logs pricing and retention. |
+| [Logging](https://developers.cloudflare.com/ai-gateway/observability/logging/) | Logs are on by default. `cf-aig-collect-log` and `cf-aig-collect-log-payload` turn them off per request. Accounts whose first gateway was created on or after 2026-09-24 follow Workers Logs pricing and retention; older accounts keep Legacy Logs. |
 | [REST API](https://developers.cloudflare.com/ai-gateway/usage/rest-api/) | `POST /ai/run/{model}` with `cf-aig-gateway-id` for Workers AI models, and `POST /ai/v1/chat/completions` for third-party models such as `openai/gpt-5.5`, billed through Unified Billing. Used by `src/cloudflare.ts`. |
 
 ## Workers platform
 
 | Source | What clef-loop takes from it |
 | --- | --- |
-| [Durable Objects](https://developers.cloudflare.com/durable-objects/) | One instance per route version holds the revert window. An instance handles one request at a time, so the window can't race. |
-| [workers.dev](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/) | A workers.dev hostname isn't in your zone, so zone WAF rules don't apply to it. See the note in `wrangler.jsonc`. |
+| [Durable Objects](https://developers.cloudflare.com/durable-objects/) | One instance per route version holds the revert window. An instance is single-threaded and cooperatively multi-tasked, and `record` reads and writes the window with only storage calls in between, so two updates can't interleave. |
+| [workers.dev](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/) | Production Workers are recommended on a route or Custom Domain rather than workers.dev, which is treated as a Free website; Cloudflare Access can gate a workers.dev URL. See the note in `wrangler.jsonc`. |

@@ -59,8 +59,14 @@ describe("evaluate", () => {
     // Every call is tagged as eval traffic so capture skips it.
     assert.equal(seen.length, 180);
     assert.ok(seen.every((s) => s.meta.clef_loop_eval === true && s.meta.run === "test-run"));
-    // Pairwise tests are against the first arm.
-    assert.deepEqual(rep.pairwise.map((p) => p.b), ["majority", "clef", "lora", "frontier"]);
+    // Every pair is tested, so tuned vs base and tuned vs frontier are in the report.
+    assert.equal(rep.pairwise.length, 10);
+    assert.deepEqual(rep.pairwise.slice(0, 4).map((p) => p.b), ["majority", "clef", "lora", "frontier"]);
+    const loraVsFrontier = rep.pairwise.find((p) => p.a === "lora" && p.b === "frontier")!;
+    assert.deepEqual([loraVsFrontier.aOnly, loraVsFrontier.bOnly, loraVsFrontier.p], [0, 0, 1]);
+    const clefVsLora = rep.pairwise.find((p) => p.a === "clef" && p.b === "lora")!;
+    assert.equal(clefVsLora.aOnly, Math.round(by.clef.exactMatch * 60));
+    assert.equal(clefVsLora.bOnly, 0);
     const md = renderMarkdown(rep, "Synthetic data.");
     assert.match(md, /\| clef \| systemone \|/);
     assert.match(md, /not production latency/);

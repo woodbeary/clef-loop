@@ -83,12 +83,6 @@ async function decide(request: Request, vars: Vars, deps: Deps): Promise<Respons
   const mode: Mode = vars.MODE === "shadow" || vars.MODE === "canary" ? vars.MODE : "off";
   const meta: Meta = { route_version: vars.ROUTE_VERSION, req: requestId };
 
-  if (mode === "shadow" && tuned) {
-    deps.waitUntil(
-      runArm(deps, vars, tuned, state, questions, { ...meta, route: "shadow" }).then((r) => deps.route.record(!r.ok)),
-    );
-  }
-
   let route = chooseRoute({
     mode,
     percent: Number(vars.CANARY_PERCENT || "0"),
@@ -110,6 +104,14 @@ async function decide(request: Request, vars: Vars, deps: Deps): Promise<Respons
   }
 
   const r = await runArm(deps, vars, base, state, questions, { ...meta, route: fallback ? "fallback" : "base" });
+  // The shadow call starts after the base call has returned and its log id has been read.
+  // env.AI.aiGatewayLogId holds only the last call's id, so running both at once could hand
+  // the caller the shadow log's id, and /feedback would label the wrong log.
+  if (mode === "shadow" && tuned) {
+    deps.waitUntil(
+      runArm(deps, vars, tuned, state, questions, { ...meta, route: "shadow" }).then((s) => deps.route.record(!s.ok)),
+    );
+  }
   if (!r.ok) return json({ error: `base model failed: ${r.error}`, request_id: requestId }, 502);
   return json({ decision: r.decision, route: "base", fallback, log_id: r.logId, request_id: requestId });
 }

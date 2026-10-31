@@ -21,7 +21,9 @@ customer.
      80% accuracy, the interval is roughly ±5.5 points, so smaller gaps aren't evidence;
    - per-class precision and recall, because the expensive mistake is usually one class;
    - the paired McNemar p-value between arms. Two arms scored on the same records should
-     be compared on their disagreements, not their totals.
+     be compared on their disagreements, not their totals. The report tests every pair, so
+     name the comparison you care about (tuned vs base, tuned vs frontier) before the run:
+     across ten pairs, the odds that some p lands below 0.05 by chance alone are far above 5%.
 5. **Always include the cheap baselines.** `replay` (what the production model said at the
    time) and `majority` (always the most common label). A tuned model that barely beats
    `majority` hasn't learned the task.

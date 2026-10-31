@@ -129,7 +129,8 @@ describe("canary Worker", () => {
     const body = (await (await handle(req("decide", decideBody), vars({ MODE: "shadow" }), h.deps)).json()) as Record<string, unknown>;
     await h.settle();
     assert.equal(body.route, "base");
-    assert.deepEqual(h.runs.map((r) => r.metadata.route).sort(), ["base", "shadow"]);
+    assert.deepEqual(h.runs.map((r) => r.metadata.route), ["base", "shadow"]);
+    assert.equal(body.log_id, "log-1");
     assert.deepEqual(h.getState().recent, [false]);
   });
 

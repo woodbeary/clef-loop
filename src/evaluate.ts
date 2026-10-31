@@ -37,7 +37,7 @@ export interface EvalReport {
   n: number;
   heldOut: { from: string | null; to: string | null };
   arms: ArmReport[];
-  /** Each arm against the first arm, on the same records (exact match). */
+  /** Every pair of arms, on the same records (exact match). */
   pairwise: Array<{ a: string; b: string } & McNemar>;
   outcomes: Record<string, ArmOutcome[]>;
 }
@@ -98,7 +98,9 @@ export async function evaluate(records: DecisionRecord[], arms: NamedArm[], opts
   const reports = arms.map((arm) => report(arm, records, outcomes[arm.name]));
   const correct = (name: string) =>
     outcomes[name].map((o, i) => o.ok && sameDecision(o.decision, records[i].final, records[i]));
-  const pairwise = arms.slice(1).map((b) => ({ a: arms[0].name, b: b.name, ...mcnemar(correct(arms[0].name), correct(b.name)) }));
+  const pairwise = arms.flatMap((a, i) =>
+    arms.slice(i + 1).map((b) => ({ a: a.name, b: b.name, ...mcnemar(correct(a.name), correct(b.name)) })),
+  );
   return {
     runId: opts.runId,
     n: records.length,

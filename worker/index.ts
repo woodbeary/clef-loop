@@ -30,7 +30,7 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-/** A Durable Object handles one request at a time per instance, so the window can't race. */
+/** Single-threaded, and record() awaits only storage between its read and write, so updates can't interleave. */
 export class RouteState extends DurableObject<Env> {
   async admit(): Promise<boolean> {
     return !(await this.load()).reverted;

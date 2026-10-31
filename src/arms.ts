@@ -76,7 +76,7 @@ export function parseResult(arm: CallableArm, raw: unknown, questions: Questions
 }
 
 export function defaultSelector(model: string): string {
-  const m = model.match(/^@cf\/cloudflare\/(clef(?:-flash)?)$/);
+  const m = model.match(/^@cf\/cloudflare\/(clef(?:-flash|-omni)?)$/);
   return m ? m[1] : model;
 }
 

@@ -12,6 +12,8 @@ describe("buildCall", () => {
     assert.deepEqual(call, { transport: "workers-ai", model: "@cf/cloudflare/clef-flash", input: { model: "clef-flash", state: STATE, questions: QUESTIONS } });
     const big = buildCall({ kind: "systemone", model: "@cf/cloudflare/clef" }, STATE, QUESTIONS);
     assert.equal(big.transport === "workers-ai" && big.input.model, "clef");
+    const omni = buildCall({ kind: "systemone", model: "@cf/cloudflare/clef-omni" }, STATE, QUESTIONS);
+    assert.equal(omni.transport === "workers-ai" && omni.input.model, "clef-omni");
     const byom = buildCall({ kind: "systemone", model: "some-byom-id", selector: "clef-flash" }, STATE, QUESTIONS);
     assert.equal(byom.transport === "workers-ai" && byom.input.model, "clef-flash");
   });

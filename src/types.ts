@@ -56,10 +56,10 @@ export interface DecisionRecord {
 /** How to call one model. Shared by the eval CLI and the canary Worker. */
 export type ArmSpec =
   | {
-      /** Any model that speaks the System One API: Clef on Workers AI, a BYOM deployment, Jev. */
+      /** A System One model on Workers AI: Clef, Clef-flash, Clef-omni, or a BYOM deployment. */
       kind: "systemone";
       model: string;
-      /** The body's `model` field. Clef requires "clef" or "clef-flash". */
+      /** The body's `model` field. Clef models require "clef", "clef-flash" or "clef-omni" (one per model). */
       selector?: string;
     }
   | {
