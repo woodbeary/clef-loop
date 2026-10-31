@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "clef-loop-canary",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-10-01",
+  "ai": { "binding": "AI" },
+  "durable_objects": {
+    "bindings": [{ "name": "ROUTE", "class_name": "RouteState" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RouteState"] }],
+  "observability": { "enabled": true },
+  // workers.dev is not in your zone, so zone WAF rules don't apply there. The bearer
+  // token guards every route; for production, serve it on a Custom Domain or call it
+  // through a service binding and set workers_dev to false.
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    "GATEWAY_ID": "clef-loop",
+    // Base arm: Clef-flash on Workers AI (System One API).
+    "BASE_ARM": "{\"kind\":\"systemone\",\"model\":\"@cf/cloudflare/clef-flash\"}",
+    // Tuned arm. Empty means base only. Examples:
+    //   Workers AI LoRA (public today):
+    //     {"kind":"lora","model":"@cf/mistral/mistral-7b-instruct-v0.2-lora","lora":"<finetune name>","template":"mistral"}
+    //   A BYOM deployment of a tuned Clef (needs BYOM access; the model id comes from Cloudflare):
+    //     {"kind":"systemone","model":"<byom model id>","selector":"clef-flash"}
+    "TUNED_ARM": "",
+    // off | shadow (serve base, run tuned on the side) | canary (send CANARY_PERCENT to tuned)
+    "MODE": "off",
+    "CANARY_PERCENT": "10",
+    // Changing this re-buckets keys and starts a fresh revert window.
+    "ROUTE_VERSION": "v1",
+    "TUNED_TIMEOUT_MS": "1500",
+    // Revert the route when more than 1% of the last 200 tuned requests fell back
+    // (judged once at least 50 are in the window).
+    "REVERT_WINDOW": "200",
+    "REVERT_MIN_SAMPLES": "50",
+    "REVERT_MAX_FAILURE_RATE": "0.01"
+  }
+  // Secret: npx wrangler secret put CLEF_LOOP_TOKEN
+}
