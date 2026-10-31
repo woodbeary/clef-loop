@@ -1,0 +1,8 @@
+# Cog package for a tuned Clef-flash, for Workers AI Bring Your Own Model.
+# Format: https://github.com/replicate/cog (cog.yaml + a Python predictor), the
+# packaging Cloudflare names for BYOM (blog.cloudflare.com/ai-platform).
+build:
+  gpu: true
+  python_version: "3.12"
+  python_requirements: requirements.txt
+predict: "predict.py:Predictor"

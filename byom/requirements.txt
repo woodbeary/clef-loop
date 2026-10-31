@@ -1,0 +1,6 @@
+# The Clef-flash model card says it was tested with torch 2.11 and transformers 5.10.2.
+torch==2.11.0
+transformers==5.10.2
+huggingface_hub
+safetensors
+pillow
