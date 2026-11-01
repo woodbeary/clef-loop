@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { parseRevertConfig } from "../src/canary.ts";
 import { memoryStorage, RouteBook, type RouteStatus } from "../src/route-book.ts";
-import { authorized, handle, type AiBinding, type Deps, type RouteStore, type Vars } from "../worker/handler.ts";
+import { authorized, handle, stateHash, type AiBinding, type DecisionEvent, type Deps, type RouteStore, type Vars } from "../worker/handler.ts";
 import { QUESTIONS } from "../scripts/synthetic.ts";
 
 const TOKEN = "test-token-not-a-secret";
@@ -28,13 +28,13 @@ function vars(over: Partial<Vars> = {}): Vars {
 type TunedBehavior = "ok" | "error" | "prose" | "slow";
 
 function harness(tuned: TunedBehavior = "ok") {
-  const runs: Array<{ model: string; input: Record<string, unknown>; metadata: Record<string, unknown> }> = [];
+  const runs: Array<{ model: string; input: Record<string, unknown>; metadata: Record<string, unknown>; collectLog?: boolean }> = [];
   const patches: Array<{ id: string; data: unknown }> = [];
   let n = 0;
   const ai: AiBinding = {
     aiGatewayLogId: null,
     async run(model, input, options) {
-      runs.push({ model, input: input as Record<string, unknown>, metadata: options?.gateway?.metadata ?? {} });
+      runs.push({ model, input: input as Record<string, unknown>, metadata: options?.gateway?.metadata ?? {}, collectLog: options?.gateway?.collectLog });
       ai.aiGatewayLogId = `log-${++n}`;
       if (model === "@cf/cloudflare/clef-flash") {
         return { model: "clef-flash", answers: { decision: { type: "choice", choice: "skip", probabilities: { accept: 0.1, skip: 0.8, needs_info: 0.1 }, confidence: 0.7 } }, usage: { input_tokens: 1, output_tokens: 0 } };
@@ -48,8 +48,10 @@ function harness(tuned: TunedBehavior = "ok") {
   };
   const route: RouteStore = new RouteBook(memoryStorage(), parseRevertConfig({ REVERT_MIN_SAMPLES: "5", REVERT_WINDOW: "20" }));
   const pending: Promise<unknown>[] = [];
-  const deps: Deps = { ai, route, waitUntil: (p) => void pending.push(p) };
-  return { deps, runs, patches, settle: () => Promise.all(pending), status: () => route.status() as Promise<RouteStatus> };
+  const events: DecisionEvent[] = [];
+  let clock = 1000;
+  const deps: Deps = { ai, route, waitUntil: (p) => void pending.push(p), log: (e) => void events.push(e), now: () => (clock += 7) };
+  return { deps, runs, patches, events, settle: () => Promise.all(pending), status: () => route.status() as Promise<RouteStatus> };
 }
 
 function req(path: string, body?: unknown, token = TOKEN): Request {
@@ -159,5 +161,88 @@ describe("canary Worker", () => {
     ];
     for (const r of bad) assert.equal((await handle(r, vars(), h.deps)).status, 400);
     assert.equal((await handle(req("nope"), vars(), h.deps)).status, 404);
+  });
+
+  describe("capture shim", () => {
+    const pii = {
+      key: "lead-7",
+      state: {
+        customer_name: "Dana Example",
+        phone: "555-555-0142",
+        message: "Hi, this is Dana Example. Call 555-555-0142 or dana@example.com about the garage cleanout.",
+        distance_miles: 6,
+      },
+      questions: QUESTIONS,
+    };
+
+    it("redacts the state before the model sees it and logs nothing for a tenant without consent", async () => {
+      const h = harness();
+      const body = (await (await handle(req("decide", { ...pii, tenant: "trial-user" }), vars({ MODE: "off", CAPTURE_TENANTS: "acme" }), h.deps)).json()) as Record<string, unknown>;
+      assert.equal(body.captured, false);
+      assert.equal(h.runs.length, 1);
+      assert.equal(h.runs[0].collectLog, false);
+      const sent = JSON.stringify(h.runs[0].input);
+      for (const leak of ["Dana", "555-555-0142", "dana@example.com"]) assert.ok(!sent.includes(leak), `${leak} reached the model`);
+      assert.match(sent, /\[NAME\]/);
+      assert.match(sent, /\[PHONE\]/);
+      assert.match(sent, /\[EMAIL\]/);
+      assert.equal(h.events[0].capture_skipped, "no consent");
+    });
+
+    it("turns gateway logging on per request only for a tenant that opted in", async () => {
+      const h = harness();
+      const v = vars({ MODE: "off", CAPTURE_TENANTS: "acme, other" });
+      const body = (await (await handle(req("decide", { ...pii, tenant: "acme" }), v, h.deps)).json()) as Record<string, unknown>;
+      assert.equal(body.captured, true);
+      assert.equal(h.runs[0].collectLog, true);
+      assert.equal(h.runs[0].metadata.tenant, "acme");
+      assert.ok(!JSON.stringify(h.runs[0].input).includes("Dana"));
+      await handle(req("decide", { ...pii }), v, h.deps);
+      assert.equal(h.runs[1].collectLog, false);
+      assert.equal(h.runs[1].metadata.tenant, "default");
+    });
+
+    it("skips capture for an opted-in tenant when the residual audit still finds PII", async () => {
+      const h = harness();
+      const state = { message: "acct 9876 5432 1098, ping @dana_example", distance_miles: 3 };
+      const body = (await (await handle(req("decide", { key: "k", tenant: "acme", state, questions: QUESTIONS }), vars({ MODE: "off", CAPTURE_TENANTS: "acme" }), h.deps)).json()) as Record<string, unknown>;
+      assert.equal(body.captured, false);
+      assert.equal(h.runs[0].collectLog, false);
+      assert.equal(h.events[0].capture_skipped, "residual PII");
+    });
+
+    it("keeps a metadata-only event for every decision: pTop, margin, latency and a state hash, never the state", async () => {
+      const h = harness();
+      const body = (await (await handle(req("decide", { ...pii, tenant: "trial-user" }), vars({ MODE: "off" }), h.deps)).json()) as Record<string, unknown>;
+      assert.equal(h.events.length, 1);
+      const e = h.events[0];
+      assert.equal(e.req, body.request_id);
+      assert.equal(e.route, "base");
+      assert.equal(e.answers.decision.p_top, 0.8);
+      assert.ok(Math.abs(e.answers.decision.margin - 0.7) < 1e-9);
+      assert.equal(e.latency_ms, 7);
+      assert.match(e.state_hash, /^[0-9a-f]{16}$/);
+      assert.equal(e.state_hash, await stateHash(h.runs[0].input.state as never));
+      assert.ok(e.redactions >= 4);
+      const line = JSON.stringify(e);
+      for (const leak of ["Dana", "555-555", "example.com", "garage"]) assert.ok(!line.includes(leak), `${leak} in the event`);
+      assert.deepEqual(body.answers, { decision: { p_top: 0.8, margin: e.answers.decision.margin } });
+    });
+
+    it("flags low-confidence answers for a person when ABSTAIN_BELOW is set", async () => {
+      const h = harness();
+      const low = (await (await handle(req("decide", decideBody), vars({ MODE: "off", ABSTAIN_BELOW: "0.9" }), h.deps)).json()) as Record<string, unknown>;
+      assert.deepEqual(low.needs_person, ["decision"]);
+      const ok = (await (await handle(req("decide", decideBody), vars({ MODE: "off", ABSTAIN_BELOW: "0.75" }), h.deps)).json()) as Record<string, unknown>;
+      assert.deepEqual(ok.needs_person, []);
+      assert.deepEqual(h.events.map((e) => e.needs_person), [["decision"], []]);
+    });
+
+    it("keeps keys the operator marks as safe, and rejects a malformed tenant", async () => {
+      const h = harness();
+      await handle(req("decide", { key: "k", state: { service_name: "junk hauling", distance_miles: 2 }, questions: QUESTIONS }), vars({ MODE: "off", REDACT_KEEP_KEYS: "service_name" }), h.deps);
+      assert.equal((h.runs[0].input.state as Record<string, unknown>).service_name, "junk hauling");
+      assert.equal((await handle(req("decide", { ...pii, tenant: "bad tenant!" }), vars(), h.deps)).status, 400);
+    });
   });
 });

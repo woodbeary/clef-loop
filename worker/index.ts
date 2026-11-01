@@ -28,6 +28,7 @@ export default {
         reset: () => stub.reset(),
       },
       waitUntil: (p) => ctx.waitUntil(p),
+      log: (event) => console.log(JSON.stringify(event)),
     });
   },
 } satisfies ExportedHandler<Env>;

@@ -30,6 +30,14 @@
     // Changing this re-buckets keys and starts a fresh revert window.
     "ROUTE_VERSION": "v1",
     "TUNED_TIMEOUT_MS": "1500",
+    // Tenants that opted in to capture, comma-separated. Only their requests are logged by
+    // AI Gateway (collectLog: true per request); everyone else gets collectLog: false.
+    // Every state is redacted before the call either way. Empty: nobody is captured.
+    "CAPTURE_TENANTS": "",
+    // State keys that look sensitive but carry no PII in your data, kept as-is.
+    "REDACT_KEEP_KEYS": "",
+    // Flag answers whose top probability is below this for a person to decide. Empty: off.
+    "ABSTAIN_BELOW": "",
     // Revert the route when the 95% Wilson lower bound of tuned's failure rate over its
     // last 200 requests is above 1%, or above base's own rate over its last 200 if that is
     // higher (judged once 50 tuned requests are in). Failures include validator rejects.

@@ -2,7 +2,15 @@
 // same code runs in the Worker (worker/index.ts) and in Node tests with a fake AI
 // binding.
 //
-//   POST /decide        { key?, state, questions } -> { decision, route, fallback, log_id, request_id }
+// It is also the capture shim. Every state is redacted here, before env.AI.run, so the
+// model serves on the same redacted state it would be trained on and raw PII never
+// reaches AI Gateway (whose DLP can flag or block, not redact). The gateway logs a
+// request only for a tenant listed in CAPTURE_TENANTS (collectLog: true per request),
+// and only when the residual audit finds nothing; everyone else gets collectLog: false
+// and a metadata-only event (pTop, margin, latency, a state hash) in Workers Logs.
+//
+//   POST /decide        { key?, tenant?, state, questions }
+//                       -> { decision, route, fallback, captured, answers, needs_person, log_id, request_id }
 //   POST /feedback      { log_id, final, route }   -> 204; attaches the human's decision to the log
 //   GET  /route                                    -> revert state
 //   POST /route/reset                              -> clears a revert
@@ -11,10 +19,13 @@
 // a request id, so production traffic becomes the next training set. All routes need
 // `Authorization: Bearer <CLEF_LOOP_TOKEN>`.
 
-import { buildCall, parseResult, type CallableArm } from "../src/arms.ts";
+import { buildCall, parseAnswer, type CallableArm } from "../src/arms.ts";
+import { confidence } from "../src/calibration.ts";
 import { chooseRoute, type Mode } from "../src/canary.ts";
+import { auditResidual, redactJson, type RedactionCounts } from "../src/redact.ts";
 import type { VerdictResult, WindowRoute } from "../src/route-book.ts";
-import { isObject, validateQuestions } from "../src/schema.ts";
+import { isObject, validateQuestions, type Probabilities } from "../src/schema.ts";
+import { canonical } from "../src/split.ts";
 import type { ArmSpec, Decision, Json, Questions } from "../src/types.ts";
 
 type Meta = Record<string, string | number | boolean>;
@@ -22,7 +33,7 @@ type Meta = Record<string, string | number | boolean>;
 /** The parts of the Workers AI binding this Worker uses (see ai-gateway/usage/worker-binding-methods).
  * Model ids are plain strings because a BYOM model's id isn't in the generated types. */
 export interface AiBinding {
-  run(model: string, input: unknown, options?: { gateway?: { id: string; metadata?: Meta } }): Promise<unknown>;
+  run(model: string, input: unknown, options?: { gateway?: { id: string; metadata?: Meta; collectLog?: boolean } }): Promise<unknown>;
   aiGatewayLogId: string | null;
   gateway(id: string): { patchLog(logId: string, data: { feedback?: -1 | 1; score?: number; metadata?: Meta }): Promise<void> };
 }
@@ -45,6 +56,28 @@ export interface Vars {
   CANARY_PERCENT?: string;
   ROUTE_VERSION: string;
   TUNED_TIMEOUT_MS?: string;
+  /** Comma-separated tenant ids that opted in to capture. Empty: AI Gateway logs nobody's requests. */
+  CAPTURE_TENANTS?: string;
+  /** Flag answers whose top probability is below this for a person to decide. */
+  ABSTAIN_BELOW?: string;
+  /** Comma-separated state keys that look sensitive (service_name, ip_range) but carry no PII, kept as-is. */
+  REDACT_KEEP_KEYS?: string;
+}
+
+/** One line per /decide, for every tenant. It never holds the state, only a hash of the redacted state. */
+export interface DecisionEvent {
+  event: "clef_loop.decision";
+  req: string;
+  tenant: string;
+  route: "tuned" | "base";
+  route_version: string;
+  captured: boolean;
+  capture_skipped: "no consent" | "residual PII" | null;
+  latency_ms: number;
+  state_hash: string;
+  redactions: number;
+  answers: Record<string, { p_top: number; margin: number }>;
+  needs_person: string[];
 }
 
 export interface Deps {
@@ -52,6 +85,20 @@ export interface Deps {
   route: RouteStore;
   waitUntil(p: Promise<unknown>): void;
   fetch?: typeof fetch;
+  log?(event: DecisionEvent): void;
+  now?(): number;
+}
+
+const TENANT = /^[A-Za-z0-9_.-]{1,64}$/;
+
+export function captureTenants(raw: string | undefined): Set<string> {
+  return new Set((raw ?? "").split(",").map((t) => t.trim()).filter(Boolean));
+}
+
+/** First 16 hex characters of SHA-256 over the canonical JSON of the (redacted) state. */
+export async function stateHash(state: Json): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical(state)));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
 }
 
 export async function handle(request: Request, vars: Vars, deps: Deps): Promise<Response> {
@@ -74,16 +121,61 @@ async function decide(request: Request, vars: Vars, deps: Deps): Promise<Respons
   const problems = validateQuestions(body.questions);
   if (problems.length) throw new BadRequest(`invalid questions: ${problems.join("; ")}`);
   if (!("state" in body)) throw new BadRequest("state is required");
+  if (body.tenant !== undefined && (typeof body.tenant !== "string" || !TENANT.test(body.tenant))) {
+    throw new BadRequest("tenant must be 1-64 letters, digits, '_', '.' or '-'");
+  }
   const questions = body.questions as unknown as Questions;
-  const state = body.state as Json;
+  const tenant = typeof body.tenant === "string" ? body.tenant : "default";
+  const counts: RedactionCounts = {};
+  const keepKeys = (vars.REDACT_KEEP_KEYS ?? "").split(",").map((k) => k.trim()).filter(Boolean);
+  const state = redactJson(body.state as Json, { keepKeys }, counts);
+  const consented = captureTenants(vars.CAPTURE_TENANTS).has(tenant);
+  const residual = consented && auditResidual(state).length > 0;
+  const captured = consented && !residual;
   const key = typeof body.key === "string" && body.key ? body.key : crypto.randomUUID();
   const requestId = crypto.randomUUID();
+  const now = deps.now ?? (() => Date.now());
+  const started = now();
+  const abstainBelow = vars.ABSTAIN_BELOW ? Number(vars.ABSTAIN_BELOW) : null;
+  const respond = async (served: { decision: Decision; probs?: Probabilities; logId: string | null }, route: "tuned" | "base", fallback: string | null) => {
+    const answers: DecisionEvent["answers"] = {};
+    for (const [qid, p] of Object.entries(served.probs ?? {})) {
+      const c = confidence(p);
+      answers[qid] = { p_top: c.pTop, margin: c.margin };
+    }
+    const needsPerson = abstainBelow === null ? [] : Object.entries(answers).filter(([, a]) => a.p_top < abstainBelow).map(([q]) => q);
+    deps.log?.({
+      event: "clef_loop.decision",
+      req: requestId,
+      tenant,
+      route,
+      route_version: vars.ROUTE_VERSION,
+      captured,
+      capture_skipped: captured ? null : consented ? "residual PII" : "no consent",
+      latency_ms: now() - started,
+      state_hash: await stateHash(state),
+      redactions: Object.values(counts).reduce((a, b) => a + b, 0),
+      answers,
+      needs_person: needsPerson,
+    });
+    return json({
+      decision: served.decision,
+      route,
+      fallback,
+      captured,
+      answers,
+      needs_person: needsPerson,
+      log_id: served.logId,
+      request_id: requestId,
+    });
+  };
 
   const base = parseArmVar(vars.BASE_ARM, "BASE_ARM");
   if (!base) throw new Error("BASE_ARM must be set");
   const tuned = parseArmVar(vars.TUNED_ARM, "TUNED_ARM");
   const mode: Mode = vars.MODE === "shadow" || vars.MODE === "canary" ? vars.MODE : "off";
-  const meta: Meta = { route_version: vars.ROUTE_VERSION, req: requestId };
+  const meta: Meta = { route_version: vars.ROUTE_VERSION, req: requestId, tenant };
+  const gw = { collectLog: captured };
 
   let route = chooseRoute({
     mode,
@@ -99,26 +191,26 @@ async function decide(request: Request, vars: Vars, deps: Deps): Promise<Respons
   let fallback: string | null = null;
   if (route === "tuned" && tuned) {
     const ms = Number(vars.TUNED_TIMEOUT_MS || "1500");
-    const r = await withTimeout(runArm(deps, vars, tuned, state, questions, { ...meta, route: "tuned" }), ms);
+    const r = await withTimeout(runArm(deps, vars, tuned, state, questions, { ...meta, route: "tuned" }, gw), ms);
     deps.waitUntil(deps.route.record("tuned", !r.ok, r.ok ? requestId : undefined));
-    if (r.ok) return json({ decision: r.decision, route: "tuned", fallback: null, log_id: r.logId, request_id: requestId });
+    if (r.ok) return respond(r, "tuned", null);
     fallback = r.error;
   }
 
-  const r = await runArm(deps, vars, base, state, questions, { ...meta, route: fallback ? "fallback" : "base" });
+  const r = await runArm(deps, vars, base, state, questions, { ...meta, route: fallback ? "fallback" : "base" }, gw);
   deps.waitUntil(deps.route.record("base", !r.ok, r.ok ? requestId : undefined));
   // The shadow call starts after the base call has returned and its log id has been read.
   // env.AI.aiGatewayLogId holds only the last call's id, so running both at once could hand
   // the caller the shadow log's id, and /feedback would label the wrong log.
   if (mode === "shadow" && tuned) {
     deps.waitUntil(
-      runArm(deps, vars, tuned, state, questions, { ...meta, route: "shadow" }).then((s) =>
+      runArm(deps, vars, tuned, state, questions, { ...meta, route: "shadow" }, gw).then((s) =>
         deps.route.record("tuned", !s.ok, s.ok ? `${requestId}:shadow` : undefined),
       ),
     );
   }
   if (!r.ok) return json({ error: `base model failed: ${r.error}`, request_id: requestId }, 502);
-  return json({ decision: r.decision, route: "base", fallback, log_id: r.logId, request_id: requestId });
+  return respond(r, "base", fallback);
 }
 
 async function feedback(request: Request, vars: Vars, deps: Deps): Promise<Response> {
@@ -139,12 +231,20 @@ async function feedback(request: Request, vars: Vars, deps: Deps): Promise<Respo
   return new Response(null, { status: 204 });
 }
 
-type ArmRun = { ok: true; decision: Decision; logId: string | null } | { ok: false; error: string };
+type ArmRun = { ok: true; decision: Decision; probs?: Probabilities; logId: string | null } | { ok: false; error: string };
 
-async function runArm(deps: Deps, vars: Vars, arm: CallableArm, state: Json, questions: Questions, metadata: Meta): Promise<ArmRun> {
+async function runArm(
+  deps: Deps,
+  vars: Vars,
+  arm: CallableArm,
+  state: Json,
+  questions: Questions,
+  metadata: Meta,
+  gw: { collectLog: boolean },
+): Promise<ArmRun> {
   try {
     const call = buildCall(arm, state, questions);
-    const gateway = { id: vars.GATEWAY_ID, metadata };
+    const gateway = { id: vars.GATEWAY_ID, metadata, collectLog: gw.collectLog };
     let raw: unknown;
     let logId: string | null = null;
     if (call.transport === "workers-ai") {
@@ -164,7 +264,8 @@ async function runArm(deps: Deps, vars: Vars, arm: CallableArm, state: Json, que
       if (!res.ok) throw new Error(`${call.url} -> ${res.status}`);
       raw = await res.json();
     }
-    return { ok: true, decision: parseResult(arm, raw, questions), logId };
+    const answer = parseAnswer(arm, raw, questions);
+    return { ok: true, decision: answer.decision, ...(answer.probs ? { probs: answer.probs } : {}), logId };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
