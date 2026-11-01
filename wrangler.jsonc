@@ -5,9 +5,15 @@
   "compatibility_date": "2026-10-01",
   "ai": { "binding": "AI" },
   "durable_objects": {
-    "bindings": [{ "name": "ROUTE", "class_name": "RouteState" }]
+    "bindings": [
+      { "name": "ROUTE", "class_name": "RouteState" },
+      { "name": "LABELS", "class_name": "Labels" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RouteState"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RouteState"] },
+    { "tag": "v2", "new_sqlite_classes": ["Labels"] }
+  ],
   "observability": { "enabled": true },
   // workers.dev is not in your zone, so zone WAF rules don't apply there. The bearer
   // token guards every route; for production, serve it on a Custom Domain or call it

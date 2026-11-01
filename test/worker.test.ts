@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { parseRevertConfig } from "../src/canary.ts";
+import { LabelBook, type Label } from "../src/labels.ts";
 import { memoryStorage, RouteBook, type RouteStatus } from "../src/route-book.ts";
 import { authorized, handle, stateHash, type AiBinding, type DecisionEvent, type Deps, type RouteStore, type Vars } from "../worker/handler.ts";
 import { QUESTIONS } from "../scripts/synthetic.ts";
@@ -29,13 +30,12 @@ type TunedBehavior = "ok" | "error" | "prose" | "slow";
 
 function harness(tuned: TunedBehavior = "ok") {
   const runs: Array<{ model: string; input: Record<string, unknown>; metadata: Record<string, unknown>; collectLog?: boolean }> = [];
-  const patches: Array<{ id: string; data: unknown }> = [];
-  let n = 0;
-  const ai: AiBinding = {
-    aiGatewayLogId: null,
+  const ai: AiBinding & { aiGatewayLogId?: string } = {
+    get aiGatewayLogId(): string {
+      throw new Error("the Worker read env.AI.aiGatewayLogId, which can hold another request's log id");
+    },
     async run(model, input, options) {
       runs.push({ model, input: input as Record<string, unknown>, metadata: options?.gateway?.metadata ?? {}, collectLog: options?.gateway?.collectLog });
-      ai.aiGatewayLogId = `log-${++n}`;
       if (model === "@cf/cloudflare/clef-flash") {
         return { model: "clef-flash", answers: { decision: { type: "choice", choice: "skip", probabilities: { accept: 0.1, skip: 0.8, needs_info: 0.1 }, confidence: 0.7 } }, usage: { input_tokens: 1, output_tokens: 0 } };
       }
@@ -44,14 +44,15 @@ function harness(tuned: TunedBehavior = "ok") {
       if (tuned === "slow") await new Promise((r) => setTimeout(r, 200));
       return { response: "accept" };
     },
-    gateway: () => ({ async patchLog(id, data) { patches.push({ id, data }); } }),
   };
   const route: RouteStore = new RouteBook(memoryStorage(), parseRevertConfig({ REVERT_MIN_SAMPLES: "5", REVERT_WINDOW: "20" }));
   const pending: Promise<unknown>[] = [];
   const events: DecisionEvent[] = [];
   let clock = 1000;
-  const deps: Deps = { ai, route, waitUntil: (p) => void pending.push(p), log: (e) => void events.push(e), now: () => (clock += 7) };
-  return { deps, runs, patches, events, settle: () => Promise.all(pending), status: () => route.status() as Promise<RouteStatus> };
+  const books = new Map<string, LabelBook>();
+  const labels = (tenant: string) => books.get(tenant) ?? books.set(tenant, new LabelBook(memoryStorage())).get(tenant)!;
+  const deps: Deps = { ai, route, labels, waitUntil: (p) => void pending.push(p), log: (e) => void events.push(e), now: () => (clock += 7) };
+  return { deps, runs, events, labels, settle: () => Promise.all(pending), status: () => route.status() as Promise<RouteStatus> };
 }
 
 function req(path: string, body?: unknown, token = TOKEN): Request {
@@ -81,7 +82,7 @@ describe("canary Worker", () => {
     assert.deepEqual(body.decision, { decision: "accept" });
     assert.equal(body.route, "tuned");
     assert.equal(body.fallback, null);
-    assert.equal(body.log_id, "log-1");
+    assert.equal(body.log_id, undefined);
     assert.equal(h.runs.length, 1);
     assert.equal(h.runs[0].input.lora, "leads-v1");
     assert.equal(h.runs[0].metadata.route, "tuned");
@@ -129,7 +130,7 @@ describe("canary Worker", () => {
     await h.settle();
     assert.equal(body.route, "base");
     assert.deepEqual(h.runs.map((r) => r.metadata.route), ["base", "shadow"]);
-    assert.equal(body.log_id, "log-1");
+    assert.equal(h.runs[1].metadata.req, body.request_id);
     const s = await h.status();
     assert.deepEqual([s.tuned.n, s.tuned.failures, s.base.n], [1, 0, 1]);
   });
@@ -143,11 +144,101 @@ describe("canary Worker", () => {
     }
   });
 
-  it("attaches the human's final decision to the log", async () => {
-    const h = harness();
-    const res = await handle(req("feedback", { log_id: "log-9", final: { decision: "accept" }, route: "tuned" }), vars(), h.deps);
-    assert.equal(res.status, 204);
-    assert.deepEqual(h.patches, [{ id: "log-9", data: { metadata: { final: '{"decision":"accept"}', route: "tuned", route_version: "v1" } } }]);
+  describe("labels", () => {
+    const v = vars({ MODE: "off", CAPTURE_TENANTS: "acme" });
+    const decided_at = "2026-10-30T12:00:00.000Z";
+    const label = (over: Record<string, unknown> = {}) => ({ request_id: "req-1", tenant: "acme", final: { decision: "accept" }, decided_by: "human", decided_at, saw_suggestion: true, ...over });
+
+    it("stores a human label by request id, with who decided, when, and whether they saw the suggestion", async () => {
+      const h = harness();
+      const decided = (await (await handle(req("decide", { ...decideBody, tenant: "acme" }), v, h.deps)).json()) as Record<string, unknown>;
+      const res = await handle(req("feedback", label({ request_id: decided.request_id })), v, h.deps);
+      assert.equal(res.status, 204);
+      const listed = (await (await handle(req("labels?tenant=acme"), v, h.deps)).json()) as { labels: Label[]; next: string | null };
+      assert.equal(listed.labels.length, 1);
+      const l = listed.labels[0];
+      assert.deepEqual(
+        { request_id: l.request_id, final: l.final, decided_by: l.decided_by, decided_at: l.decided_at, saw_suggestion: l.saw_suggestion },
+        { request_id: decided.request_id, final: { decision: "accept" }, decided_by: "human", decided_at, saw_suggestion: true },
+      );
+      assert.equal(h.runs[0].metadata.req, decided.request_id);
+      assert.equal(listed.next, null);
+    });
+
+    it("refuses agent-made labels", async () => {
+      const h = harness();
+      const res = await handle(req("feedback", label({ decided_by: "agent" })), v, h.deps);
+      assert.equal(res.status, 422);
+      assert.match(((await res.json()) as { error: string }).error, /agent labels are refused/);
+      assert.equal((await h.labels("acme").list(null, 10)).labels.length, 0);
+    });
+
+    it("requires decided_by, decided_at, and for a person, whether they saw the suggestion", async () => {
+      const h = harness();
+      const bad = [
+        label({ decided_by: undefined }),
+        label({ decided_by: "model" }),
+        label({ decided_at: undefined }),
+        label({ decided_at: "yesterday" }),
+        label({ decided_at: "2099-01-01T00:00:00Z" }),
+        label({ saw_suggestion: undefined }),
+        label({ decided_by: "validator", saw_suggestion: true }),
+        label({ request_id: undefined }),
+        label({ final: { decision: 1 } }),
+      ];
+      for (const b of bad) assert.equal((await handle(req("feedback", b), v, h.deps)).status, 400, JSON.stringify(b));
+      assert.equal((await handle(req("feedback", label({ decided_by: "validator", saw_suggestion: undefined })), v, h.deps)).status, 204);
+    });
+
+    it("refuses labels for a tenant that didn't opt in, since nothing was logged", async () => {
+      const h = harness();
+      assert.equal((await handle(req("feedback", label({ tenant: "trial-user" })), v, h.deps)).status, 409);
+    });
+
+    it("keeps a human label over a later validator label, and lets a person correct it", async () => {
+      const h = harness();
+      assert.equal((await handle(req("feedback", label()), v, h.deps)).status, 204);
+      assert.equal((await handle(req("feedback", label({ decided_by: "validator", saw_suggestion: false, final: { decision: "skip" } })), v, h.deps)).status, 409);
+      assert.equal((await handle(req("feedback", label({ final: { decision: "needs_info" } })), v, h.deps)).status, 204);
+      const all = await h.labels("acme").list(null, 10);
+      assert.deepEqual(all.labels.map((l) => l.final.decision), ["needs_info"]);
+    });
+
+    it("pages through labels and deletes a tenant's labels when consent is withdrawn", async () => {
+      const h = harness();
+      for (const id of ["a", "b", "c"]) await handle(req("feedback", label({ request_id: id })), v, h.deps);
+      const p1 = (await (await handle(req("labels?tenant=acme&limit=2"), v, h.deps)).json()) as { labels: Label[]; next: string };
+      assert.equal(p1.labels.length, 2);
+      const p2 = (await (await handle(req(`labels?tenant=acme&after=${encodeURIComponent(p1.next)}`), v, h.deps)).json()) as { labels: Label[]; next: string | null };
+      assert.deepEqual([...p1.labels, ...p2.labels].map((l) => l.request_id).sort(), ["a", "b", "c"]);
+      assert.equal(p2.next, null);
+      const del = await handle(new Request("https://canary.example/labels?tenant=acme", { method: "DELETE", headers: { Authorization: `Bearer ${TOKEN}` } }), v, h.deps);
+      assert.equal(del.status, 200);
+      assert.equal((await h.labels("acme").list(null, 10)).labels.length, 0);
+    });
+
+    it("returns each caller its own request id when calls finish out of order", async () => {
+      const h = harness();
+      const order: Array<() => void> = [];
+      const ai = h.deps.ai;
+      const slowAi: AiBinding = {
+        async run(model, input, options) {
+          await new Promise<void>((r) => order.push(r));
+          return ai.run(model, input, options);
+        },
+      };
+      const deps = { ...h.deps, ai: slowAi };
+      const a = handle(req("decide", { ...decideBody, key: "a", tenant: "acme" }), v, deps);
+      const b = handle(req("decide", { ...decideBody, key: "b", tenant: "acme" }), v, deps);
+      while (order.length < 2) await new Promise((r) => setTimeout(r, 1));
+      order[1]();
+      const rb = (await (await b).json()) as Record<string, unknown>;
+      order[0]();
+      const ra = (await (await a).json()) as Record<string, unknown>;
+      assert.notEqual(ra.request_id, rb.request_id);
+      assert.equal(h.runs[0].metadata.req, rb.request_id);
+      assert.equal(h.runs[1].metadata.req, ra.request_id);
+    });
   });
 
   it("rejects malformed requests with 400", async () => {
@@ -156,7 +247,8 @@ describe("canary Worker", () => {
       req("decide", { state: "x", questions: {} }),
       req("decide", { questions: QUESTIONS }),
       req("feedback", { final: { decision: "accept" } }),
-      req("feedback", { log_id: "x", final: { decision: 1 } }),
+      req("feedback", { request_id: "x", tenant: "acme", final: { decision: 1 } }),
+      req("labels"),
       new Request("https://canary.example/decide", { method: "POST", headers: { Authorization: `Bearer ${TOKEN}` }, body: "{not json" }),
     ];
     for (const r of bad) assert.equal((await handle(r, vars(), h.deps)).status, 400);

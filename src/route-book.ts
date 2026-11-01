@@ -15,7 +15,7 @@ export interface KvStorage {
   put<T>(key: string, value: T): Promise<void>;
   delete(key: string): Promise<boolean>;
   deleteAll(): Promise<void>;
-  list<T>(options: { prefix: string; reverse?: boolean; limit?: number }): Promise<Map<string, T>>;
+  list<T>(options: { prefix: string; reverse?: boolean; limit?: number; startAfter?: string }): Promise<Map<string, T>>;
 }
 
 export type WindowRoute = "tuned" | "base";
@@ -158,8 +158,8 @@ export function memoryStorage(): KvStorage & { size(): number } {
     async deleteAll() {
       m.clear();
     },
-    async list<T>(o: { prefix: string; reverse?: boolean; limit?: number }) {
-      let keys = [...m.keys()].filter((k) => k.startsWith(o.prefix)).sort();
+    async list<T>(o: { prefix: string; reverse?: boolean; limit?: number; startAfter?: string }) {
+      let keys = [...m.keys()].filter((k) => k.startsWith(o.prefix) && (o.startAfter === undefined || k > o.startAfter)).sort();
       if (o.reverse) keys.reverse();
       if (o.limit !== undefined) keys = keys.slice(0, o.limit);
       return new Map(keys.map((k) => [k, structuredClone(m.get(k)) as T]));

@@ -9,19 +9,22 @@
 // and only when the residual audit finds nothing; everyone else gets collectLog: false
 // and a metadata-only event (pTop, margin, latency, a state hash) in Workers Logs.
 //
-//   POST /decide        { key?, tenant?, state, questions }
-//                       -> { decision, route, fallback, captured, answers, needs_person, log_id, request_id }
-//   POST /feedback      { log_id, final, route }   -> 204; attaches the human's decision to the log
-//   GET  /route                                    -> revert state
-//   POST /route/reset                              -> clears a revert
+//   POST   /decide          { key?, tenant?, state, questions }
+//                           -> { decision, route, fallback, captured, answers, needs_person, request_id }
+//   POST   /feedback        { request_id, tenant, final, decided_by, decided_at, saw_suggestion }
+//                           -> 204; stores the label (opted-in tenants only; agent labels refused)
+//   GET    /labels?tenant=  -> { labels, next }; the exporter joins them to gateway logs by request id
+//   DELETE /labels?tenant=  -> deletes a tenant's labels, for a withdrawn consent
+//   GET    /route           -> revert state
+//   POST   /route/reset     -> clears a revert
 //
-// Every model call goes through AI Gateway (`gateway.id`), tagged with the route and
-// a request id, so production traffic becomes the next training set. All routes need
-// `Authorization: Bearer <CLEF_LOOP_TOKEN>`.
+// Every model call goes through AI Gateway (`gateway.id`), tagged with the route, the
+// tenant and the request id (`req`). All routes need `Authorization: Bearer <CLEF_LOOP_TOKEN>`.
 
 import { buildCall, parseAnswer, type CallableArm } from "../src/arms.ts";
 import { confidence } from "../src/calibration.ts";
 import { chooseRoute, type Mode } from "../src/canary.ts";
+import { LabelError, parseLabel, type Label } from "../src/labels.ts";
 import { auditResidual, redactJson, type RedactionCounts } from "../src/redact.ts";
 import type { VerdictResult, WindowRoute } from "../src/route-book.ts";
 import { isObject, validateQuestions, type Probabilities } from "../src/schema.ts";
@@ -30,12 +33,18 @@ import type { ArmSpec, Decision, Json, Questions } from "../src/types.ts";
 
 type Meta = Record<string, string | number | boolean>;
 
-/** The parts of the Workers AI binding this Worker uses (see ai-gateway/usage/worker-binding-methods).
- * Model ids are plain strings because a BYOM model's id isn't in the generated types. */
+/** The part of the Workers AI binding this Worker uses (see ai-gateway/usage/worker-binding-methods).
+ * Model ids are plain strings because a BYOM model's id isn't in the generated types. It never reads
+ * env.AI.aiGatewayLogId: that holds only the most recent call's id, which can be another request's. */
 export interface AiBinding {
   run(model: string, input: unknown, options?: { gateway?: { id: string; metadata?: Meta; collectLog?: boolean } }): Promise<unknown>;
-  aiGatewayLogId: string | null;
-  gateway(id: string): { patchLog(logId: string, data: { feedback?: -1 | 1; score?: number; metadata?: Meta }): Promise<void> };
+}
+
+/** One tenant's labels (src/labels.ts). In the Worker this is a Durable Object per tenant. */
+export interface LabelStore {
+  put(label: Label): Promise<{ stored: boolean; reason?: string }>;
+  list(after: string | null, limit: number): Promise<{ labels: Label[]; next: string | null }>;
+  clear(): Promise<void>;
 }
 
 /** Holds the route's revert window (src/route-book.ts). In the Worker this is a Durable Object. */
@@ -83,10 +92,14 @@ export interface DecisionEvent {
 export interface Deps {
   ai: AiBinding;
   route: RouteStore;
+  labels(tenant: string): LabelStore;
   waitUntil(p: Promise<unknown>): void;
   fetch?: typeof fetch;
   log?(event: DecisionEvent): void;
+  /** Monotonic-enough milliseconds for latency. */
   now?(): number;
+  /** Wall-clock time for labels. */
+  date?(): Date;
 }
 
 const TENANT = /^[A-Za-z0-9_.-]{1,64}$/;
@@ -107,11 +120,13 @@ export async function handle(request: Request, vars: Vars, deps: Deps): Promise<
   try {
     if (request.method === "POST" && path === "/decide") return await decide(request, vars, deps);
     if (request.method === "POST" && path === "/feedback") return await feedback(request, vars, deps);
+    if (path === "/labels" && (request.method === "GET" || request.method === "DELETE")) return await labels(request, deps);
     if (request.method === "GET" && path === "/route") return json(await deps.route.status());
     if (request.method === "POST" && path === "/route/reset") return json(await deps.route.reset());
     return json({ error: "not found" }, 404);
   } catch (e) {
     if (e instanceof BadRequest) return json({ error: e.message }, 400);
+    if (e instanceof LabelError) return json({ error: e.message }, e.status);
     throw e;
   }
 }
@@ -137,7 +152,7 @@ async function decide(request: Request, vars: Vars, deps: Deps): Promise<Respons
   const now = deps.now ?? (() => Date.now());
   const started = now();
   const abstainBelow = vars.ABSTAIN_BELOW ? Number(vars.ABSTAIN_BELOW) : null;
-  const respond = async (served: { decision: Decision; probs?: Probabilities; logId: string | null }, route: "tuned" | "base", fallback: string | null) => {
+  const respond = async (served: { decision: Decision; probs?: Probabilities }, route: "tuned" | "base", fallback: string | null) => {
     const answers: DecisionEvent["answers"] = {};
     for (const [qid, p] of Object.entries(served.probs ?? {})) {
       const c = confidence(p);
@@ -165,7 +180,6 @@ async function decide(request: Request, vars: Vars, deps: Deps): Promise<Respons
       captured,
       answers,
       needs_person: needsPerson,
-      log_id: served.logId,
       request_id: requestId,
     });
   };
@@ -199,9 +213,6 @@ async function decide(request: Request, vars: Vars, deps: Deps): Promise<Respons
 
   const r = await runArm(deps, vars, base, state, questions, { ...meta, route: fallback ? "fallback" : "base" }, gw);
   deps.waitUntil(deps.route.record("base", !r.ok, r.ok ? requestId : undefined));
-  // The shadow call starts after the base call has returned and its log id has been read.
-  // env.AI.aiGatewayLogId holds only the last call's id, so running both at once could hand
-  // the caller the shadow log's id, and /feedback would label the wrong log.
   if (mode === "shadow" && tuned) {
     deps.waitUntil(
       runArm(deps, vars, tuned, state, questions, { ...meta, route: "shadow" }, gw).then((s) =>
@@ -214,24 +225,28 @@ async function decide(request: Request, vars: Vars, deps: Deps): Promise<Respons
 }
 
 async function feedback(request: Request, vars: Vars, deps: Deps): Promise<Response> {
-  const body = await readJson(request);
-  if (typeof body.log_id !== "string" || !body.log_id) throw new BadRequest("log_id is required");
-  if (!isObject(body.final) || !Object.values(body.final).every((v) => typeof v === "string")) {
-    throw new BadRequest("final must be an object of question id -> option");
+  const label = parseLabel(await readJson(request), deps.date?.() ?? new Date());
+  if (!captureTenants(vars.CAPTURE_TENANTS).has(label.tenant)) {
+    return json({ error: "this tenant has not opted in to capture, so nothing was logged to label" }, 409);
   }
-  // patchLog's merge behavior for metadata isn't documented, so the route is sent
-  // again with the label. The log stays usable whether it merges or replaces.
-  await deps.ai.gateway(vars.GATEWAY_ID).patchLog(body.log_id, {
-    metadata: {
-      final: JSON.stringify(body.final),
-      route: typeof body.route === "string" ? body.route : "unknown",
-      route_version: vars.ROUTE_VERSION,
-    },
-  });
+  const r = await deps.labels(label.tenant).put(label);
+  if (!r.stored) return json({ error: r.reason }, 409);
   return new Response(null, { status: 204 });
 }
 
-type ArmRun = { ok: true; decision: Decision; probs?: Probabilities; logId: string | null } | { ok: false; error: string };
+async function labels(request: Request, deps: Deps): Promise<Response> {
+  const url = new URL(request.url);
+  const tenant = url.searchParams.get("tenant") ?? "";
+  if (!TENANT.test(tenant)) throw new BadRequest("tenant is required");
+  if (request.method === "DELETE") {
+    await deps.labels(tenant).clear();
+    return json({ tenant, deleted: true });
+  }
+  const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get("limit") ?? "500") || 500));
+  return json(await deps.labels(tenant).list(url.searchParams.get("after"), limit));
+}
+
+type ArmRun = { ok: true; decision: Decision; probs?: Probabilities } | { ok: false; error: string };
 
 async function runArm(
   deps: Deps,
@@ -246,15 +261,11 @@ async function runArm(
     const call = buildCall(arm, state, questions);
     const gateway = { id: vars.GATEWAY_ID, metadata, collectLog: gw.collectLog };
     let raw: unknown;
-    let logId: string | null = null;
     if (call.transport === "workers-ai") {
       raw = await deps.ai.run(call.model, call.input, { gateway });
-      // Documented to hold the last call's log id; the `req` metadata finds the log if not.
-      logId = deps.ai.aiGatewayLogId;
     } else if (call.transport === "chat") {
       const { model, ...input } = call.body;
       raw = await deps.ai.run(String(model), input, { gateway });
-      logId = deps.ai.aiGatewayLogId;
     } else {
       const res = await (deps.fetch ?? fetch)(call.url, {
         method: "POST",
@@ -265,7 +276,7 @@ async function runArm(
       raw = await res.json();
     }
     const answer = parseAnswer(arm, raw, questions);
-    return { ok: true, decision: answer.decision, ...(answer.probs ? { probs: answer.probs } : {}), logId };
+    return { ok: true, decision: answer.decision, ...(answer.probs ? { probs: answer.probs } : {}) };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
