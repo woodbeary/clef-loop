@@ -80,8 +80,9 @@ network included. They're useful for spotting an outlier arm, and they are not
 production latency. Don't quote them.
 
 The Worker's metadata-only event (`clef_loop.decision` in Workers Logs, for every tenant)
-carries `latency_ms` for the served call, measured in the Worker, with the route. That is
-the number to report per route, with its window and count.
+carries `latency_ms` from the moment the Worker started the decision to the moment it had
+one, including a failed tuned attempt and its fallback, with the route. That is the number
+to report per route, with its window and count.
 
 To measure production latency:
 - **At the gateway:** each AI Gateway log has a `duration`. Filter by the `route`
