@@ -40,18 +40,47 @@ export function buildCall(arm: CallableArm, state: Json, questions: Questions): 
           ...(arm.lora ? { lora: arm.lora } : {}),
         },
       };
-    case "chat":
+    case "chat": {
+      const structured = (arm.format ?? "json_schema") === "json_schema";
       return {
         transport: "chat",
         body: {
           model: arm.model,
           messages: [
-            { role: "system", content: "You make decisions for an operations team. Reply with the answer only." },
-            { role: "user", content: decisionPrompt(state, questions) },
+            {
+              role: "system",
+              content: structured
+                ? "You make decisions for an operations team. Reply with the JSON object only."
+                : "You make decisions for an operations team. Reply with the answer only.",
+            },
+            { role: "user", content: decisionPrompt(state, questions, structured ? "json" : "text") },
           ],
+          ...(structured ? { response_format: decisionResponseFormat(questions) } : {}),
         },
       };
+    }
   }
+}
+
+/**
+ * Chat Completions structured output: a JSON object with one property per question,
+ * each limited to that question's option ids, so a frontier model can't lose on format.
+ */
+export function decisionResponseFormat(questions: Questions): Json {
+  const ids = Object.keys(questions);
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "decision",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: Object.fromEntries(ids.map((id) => [id, { type: "string", enum: optionsFor(questions[id]) }])),
+        required: ids,
+        additionalProperties: false,
+      },
+    },
+  };
 }
 
 /** Reads a decision from a model's raw result. Throws when it can't, which counts as a miss. */
@@ -97,13 +126,13 @@ export function defaultSelector(model: string): string {
 }
 
 /** The decision prompt used for LoRA training rows, LoRA inference and chat baselines. */
-export function decisionPrompt(state: Json, questions: Questions): string {
+export function decisionPrompt(state: Json, questions: Questions, answer: "text" | "json" = "text"): string {
   const ids = Object.keys(questions);
   const lines: string[] = [];
   lines.push(
-    ids.length === 1
+    ids.length === 1 && answer === "text"
       ? "Make the decision below. Answer with the option id only."
-      : "Make each decision below. Answer with a JSON object that maps each question id to one option id.",
+      : `Make ${ids.length === 1 ? "the decision" : "each decision"} below. Answer with a JSON object that maps each question id to one option id.`,
   );
   lines.push("", "State:", typeof state === "string" ? state : JSON.stringify(state, null, 2), "", "Questions:");
   for (const id of ids) {

@@ -82,8 +82,12 @@ export function parseArm(text: string): NamedArm {
       return { name, spec: { kind, model: need("a model id, e.g. systemone:@cf/cloudflare/clef-flash") } };
     case "systemone-url":
       return { name, spec: { kind, url: need("a URL, e.g. systemone-url:http://localhost:30000/v1/systemone") } };
-    case "chat":
-      return { name, spec: { kind, model: need("a model id, e.g. chat:openai/gpt-5.5") } };
+    case "chat": {
+      // chat:<model>[|text]: structured output by default; |text asks for the bare answer.
+      const [model, format] = need("a model id, e.g. chat:openai/gpt-5.5").split("|");
+      if (format !== undefined && format !== "text" && format !== "json_schema") throw new Error(`unknown chat format "${format}"`);
+      return { name, spec: { kind, model, ...(format ? { format } : {}) } };
+    }
     case "lora": {
       // lora:<model>[|<finetune>][|<template>]
       const [model, lora, template = "mistral"] = need("lora:<model>|<finetune>|<template>").split("|");
@@ -269,6 +273,20 @@ export function renderMarkdown(rep: EvalReport, note?: string): string {
     "Format failures are answers that came back but weren't an allowed option. They count as wrong above; " +
       "the column keeps them apart from wrong judgments.",
   );
+  for (const a of rep.arms) {
+    if (a.spec.kind === "systemone-url") {
+      lines.push(
+        "",
+        `\`${a.name}\` is served from a self-hosted System One server: evaluated offline, not a Workers AI or BYOM deployment.`,
+      );
+    }
+    if (a.spec.kind === "chat") {
+      lines.push(
+        "",
+        `\`${a.name}\` was asked for ${(a.spec.format ?? "json_schema") === "json_schema" ? "structured output (a JSON schema limited to the allowed options)" : "the bare answer as text"}.`,
+      );
+    }
+  }
   const qids = Object.keys(rep.arms[0].questions);
   for (const qid of qids) {
     lines.push("", `## Question \`${qid}\``, "", "| Arm | Accuracy (95% CI) | Macro-F1 | Per class: precision / recall |", "|---|---|---|---|");

@@ -80,6 +80,8 @@ export type ArmSpec =
       /** A chat model through AI Gateway, for example openai/gpt-5.5. */
       kind: "chat";
       model: string;
+      /** "json_schema" (default) asks for structured output limited to the allowed options; "text" asks for the bare answer. */
+      format?: "json_schema" | "text";
     }
   | {
       /** The answer the production model logged at capture time. No call is made. */

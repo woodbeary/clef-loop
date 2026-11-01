@@ -25,7 +25,7 @@ const USAGE = `clef-loop: capture labeled decisions, redact, split, evaluate, de
                    --arm NAME=KIND[:ARG] ... [--out DIR] [--concurrency 4] [--note TEXT] [--dry-run]
                    [--abstain-below P]   route answers with top probability < P to a person
                    kinds: replay | majority | systemone:<model> | systemone-url:<url>
-                          | lora:<model>|<finetune>|<template> | chat:<model>
+                          | lora:<model>|<finetune>|<template> | chat:<model>[|text]
   clef-loop lora check DIR [--model @cf/mistral/mistral-7b-instruct-v0.2-lora] [--set-model-type TYPE]
   clef-loop lora upload DIR --model MODEL --name NAME [--execute]
   clef-loop byom check [DIR]
