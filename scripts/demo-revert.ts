@@ -15,7 +15,8 @@ import { createValidatorServer } from "../validator/server.ts";
 import { humanRule, QUESTIONS, syntheticLeads } from "./synthetic.ts";
 
 export const TUNED_MEANS =
-  "In the live demo, 'tuned' means trained on the open Clef-flash weights and evaluated offline; it is not a BYOM deployment.";
+  "Outside this demo, a 'tuned Clef' means one trained on the open Clef-flash weights (trainer/) and evaluated offline " +
+  "from your own server (a systemone-url arm); none has been deployed through BYOM.";
 
 const TOKEN = "demo-token-not-a-secret";
 

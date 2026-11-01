@@ -64,7 +64,7 @@ every behavior the code relies on.
 
 ```sh
 npm ci
-npm test              # 129 tests
+npm test              # 133 tests
 npm run demo          # build + eval on the synthetic fixtures
 npm run demo:revert   # the canary reverting on validator rejects, locally
 python3 trainer/train.py --train data/demo/clef/train.jsonl --heldout data/demo/clef/heldout.jsonl --dry-run
@@ -152,9 +152,11 @@ blame tuned.
 - **Failures count as wrong.** A timeout, a 429 or an unparseable answer stays in the
   denominator. Answers are parsed strictly: "I would accept this" is a miss, not an
   accept.
-- **Nothing reaches a training file unless a tenant opted in, the Worker redacted it
-  before the gateway saw it, and a person or a validator supplied the label.** The model
-  serves on the same redacted state it is trained on.
+- **Nothing of a tenant's reaches a training file without that tenant's consent on
+  file, and every label comes from a person or a validator.** The Worker redacts each
+  state before the gateway sees it, so the model serves on the same redacted state it is
+  trained on, and the build redacts and audits every row again. A CSV with no tenant
+  column is treated as your team's own decision log.
 - **Labels are joined by request id, not by gateway log id.** `env.AI.aiGatewayLogId`
   holds only the most recent call's id, so the Worker never reads it.
 - **Eval traffic is tagged** (`clef_loop_eval` metadata) and skipped by capture, so
@@ -173,14 +175,16 @@ blame tuned.
 
 Run on 2026-11-01 with Node 22.22 and Python 3.13:
 
-- `npm test`: 129 tests, all passing. Beyond v0.1.0's coverage, they drive the Worker's
+- `npm test`: 133 tests, all passing. Beyond v0.1.0's coverage, they drive the Worker's
   capture shim (redaction before the call, `collectLog` per tenant, the residual-PII
   gate, the metadata-only event), labels by request id (agent labels refused, the
   human-over-validator rule, paging, deletion, two calls finishing out of order), the
   Wilson revert rule against base's rate, `/outcome`, the validator's server on loopback
-  driving a revert on well-formed wrong answers, consent windows and the label join in
-  the gateway exporter, calibration math by hand, structured output for the chat arm,
-  the anchoring check, the revert demo and the repro scripts.
+  driving a revert on well-formed wrong answers (and ignoring a verdict that isn't an
+  allowed option), consent windows and the label join in the gateway exporter, the CLI
+  refusing a CSV that names tenants without `--consent`, calibration math by hand,
+  structured output for the chat arm, the anchoring check, the revert demo and the repro
+  scripts.
 - `python -m unittest` in `byom/` (5 tests) and in `trainer/` (11 tests; the torch parity
   test is skipped where torch isn't installed, as it wasn't here).
 - `npm run typecheck` for the CLI, the canary Worker, the validator Worker and the repro

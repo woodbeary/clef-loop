@@ -3,9 +3,10 @@
 // numbers use the 555-01XX fiction range, and the card is a public test number.
 //
 // The "human" labels follow a fixed rule plus 4% noise, each with a decision time a few
-// minutes to two hours later and whether the person saw the model's suggestion first. The "logged model output"
-// follows a weaker rule, standing in for what a base model said at the time. Neither
-// is a real model; numbers computed on this data test the pipeline, nothing more.
+// minutes to two hours later and whether the person saw the model's suggestion first.
+// The "logged model output" follows a weaker rule, standing in for what a base model said
+// at the time. Neither is a real model; numbers computed on this data test the pipeline,
+// nothing more.
 
 import type { Decision, DecisionRecord, Questions } from "../src/types.ts";
 

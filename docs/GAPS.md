@@ -61,7 +61,7 @@ the tuned arm you can deploy today, and it's scored against Clef on the same hel
 1. **`collectLog` per request through the binding.** The logging docs say the
    `cf-aig-collect-log` header overrides the gateway default for one request, either way.
    The Worker uses the binding's equivalent, `collectLog` in `GatewayOptions` (checked in
-   `@cloudflare/workers-types` 5.20260907.1). Send one
+   `@cloudflare/workers-types` 5.20261014.1). Send one
    `/decide` for a tenant not in `CAPTURE_TENANTS` with the gateway default on, and check
    that no log appears; send one for an opted-in tenant with the default off, and check
    that one does.
