@@ -4,8 +4,10 @@
 //   route version, so a customer doesn't flip between models mid-conversation.
 // - Per-request fallback: if the tuned model errors, times out or returns an
 //   answer that doesn't fit the questions, the request is served by the base model.
-// - Route-level revert: if tuned failures exceed a rate over the last N tuned
-//   requests, the whole route reverts to base until someone resets it.
+// - Route-level revert: when the tuned route is shown to fail more often than allowed
+//   (see judge), the whole route reverts to base until someone resets it.
+
+import { wilson } from "./metrics.ts";
 
 export type Mode = "off" | "shadow" | "canary";
 export type Route = "base" | "tuned";
@@ -36,40 +38,64 @@ export function chooseRoute(opts: {
 }
 
 export interface RevertConfig {
-  /** How many recent tuned requests to look at. */
+  /** How many recent requests per route to look at. */
   window: number;
-  /** Revert when failures / window exceeds this (0.01 = 1%). */
+  /** The failure rate tuned must be shown to exceed (0.01 = 1%), or base's own rate if that is higher. */
   maxFailureRate: number;
-  /** Don't judge until at least this many tuned requests are in the window. */
+  /** Don't judge until at least this many tuned requests are in the window. Base's rate is used once it has as many. */
   minSamples: number;
 }
 
-export interface RevertState {
-  /** Most recent last. true = the tuned request failed and fell back. */
-  recent: boolean[];
-  reverted: boolean;
-  reason: string | null;
-  revertedAt: string | null;
+export interface WindowStats {
+  n: number;
+  failures: number;
+  rate: number | null;
+  /** 95% Wilson interval for the failure rate. */
+  ci95: [number, number] | null;
 }
 
-export const EMPTY_STATE: RevertState = { recent: [], reverted: false, reason: null, revertedAt: null };
+export interface Judgement {
+  revert: boolean;
+  /** max(maxFailureRate, base's failure rate once base has minSamples). */
+  limit: number;
+  tuned: WindowStats;
+  base: WindowStats;
+  reason: string | null;
+}
 
-export function recordOutcome(state: RevertState, failed: boolean, cfg: RevertConfig, now: Date): RevertState {
-  const recent = [...state.recent, failed].slice(-cfg.window);
-  if (state.reverted) return { ...state, recent };
-  const failures = recent.filter(Boolean).length;
-  const rate = failures / recent.length;
-  if (recent.length >= cfg.minSamples && rate > cfg.maxFailureRate) {
-    return {
-      recent,
-      reverted: true,
-      reason: `${failures} of the last ${recent.length} tuned requests failed (${(100 * rate).toFixed(1)}% > ${(
-        100 * cfg.maxFailureRate
-      ).toFixed(1)}%)`,
-      revertedAt: now.toISOString(),
-    };
-  }
-  return { ...state, recent };
+export function windowStats(failed: boolean[]): WindowStats {
+  const n = failed.length;
+  const failures = failed.filter(Boolean).length;
+  return { n, failures, rate: n ? failures / n : null, ci95: n ? wilson(failures, n) : null };
+}
+
+/**
+ * Reverts only when the evidence says tuned fails more often than allowed: the lower
+ * end of the 95% Wilson interval for tuned's failure rate must pass the limit, and the
+ * limit is base's own failure rate when that is higher. One transient 429 at request
+ * 50 doesn't revert a good canary, and an outage that hits both routes doesn't blame
+ * tuned. A failure is an error, a timeout, an answer that doesn't fit the questions,
+ * or a validator reject.
+ */
+export function judge(tunedFailed: boolean[], baseFailed: boolean[], cfg: RevertConfig): Judgement {
+  const tuned = windowStats(tunedFailed);
+  const base = windowStats(baseFailed);
+  const baseRate = base.n >= cfg.minSamples ? base.rate! : 0;
+  const limit = Math.max(cfg.maxFailureRate, baseRate);
+  if (tuned.n < cfg.minSamples) return { revert: false, limit, tuned, base, reason: null };
+  const lower = tuned.ci95![0];
+  if (lower <= limit) return { revert: false, limit, tuned, base, reason: null };
+  const pctf = (x: number) => `${(100 * x).toFixed(1)}%`;
+  const baseNote = base.n >= cfg.minSamples ? `base ${pctf(base.rate!)} of ${base.n}` : `base has ${base.n} of ${cfg.minSamples} samples`;
+  return {
+    revert: true,
+    limit,
+    tuned,
+    base,
+    reason:
+      `${tuned.failures} of the last ${tuned.n} tuned requests failed (${pctf(tuned.rate!)}, 95% lower bound ${pctf(lower)}), ` +
+      `above the limit ${pctf(limit)} (${baseNote})`,
+  };
 }
 
 export function parseRevertConfig(env: {

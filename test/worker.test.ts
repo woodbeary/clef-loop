@@ -3,7 +3,8 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { EMPTY_STATE, parseRevertConfig, recordOutcome, type RevertState } from "../src/canary.ts";
+import { parseRevertConfig } from "../src/canary.ts";
+import { memoryStorage, RouteBook, type RouteStatus } from "../src/route-book.ts";
 import { authorized, handle, type AiBinding, type Deps, type RouteStore, type Vars } from "../worker/handler.ts";
 import { QUESTIONS } from "../scripts/synthetic.ts";
 
@@ -45,16 +46,10 @@ function harness(tuned: TunedBehavior = "ok") {
     },
     gateway: () => ({ async patchLog(id, data) { patches.push({ id, data }); } }),
   };
-  let state: RevertState = EMPTY_STATE;
-  const route: RouteStore = {
-    async admit() { return !state.reverted; },
-    async record(failed) { state = recordOutcome(state, failed, parseRevertConfig({ REVERT_MIN_SAMPLES: "5", REVERT_WINDOW: "20" }), new Date()); return state; },
-    async status() { return state; },
-    async reset() { state = EMPTY_STATE; return { reverted: false }; },
-  };
+  const route: RouteStore = new RouteBook(memoryStorage(), parseRevertConfig({ REVERT_MIN_SAMPLES: "5", REVERT_WINDOW: "20" }));
   const pending: Promise<unknown>[] = [];
   const deps: Deps = { ai, route, waitUntil: (p) => void pending.push(p) };
-  return { deps, runs, patches, settle: () => Promise.all(pending), getState: () => state };
+  return { deps, runs, patches, settle: () => Promise.all(pending), status: () => route.status() as Promise<RouteStatus> };
 }
 
 function req(path: string, body?: unknown, token = TOKEN): Request {
@@ -89,7 +84,7 @@ describe("canary Worker", () => {
     assert.equal(h.runs[0].input.lora, "leads-v1");
     assert.equal(h.runs[0].metadata.route, "tuned");
     assert.equal(h.runs[0].metadata.req, body.request_id);
-    assert.equal(h.getState().recent.length, 1);
+    assert.equal((await h.status()).tuned.n, 1);
   });
 
   for (const behavior of ["error", "prose", "slow"] as const) {
@@ -101,7 +96,8 @@ describe("canary Worker", () => {
       assert.deepEqual(body.decision, { decision: "skip" });
       assert.match(String(body.fallback), behavior === "error" ? /5007/ : behavior === "prose" ? /not an option id/ : /timed out/);
       assert.equal(h.runs.at(-1)!.metadata.route, "fallback");
-      assert.deepEqual(h.getState().recent, [true]);
+      const s = await h.status();
+      assert.deepEqual([s.tuned.n, s.tuned.failures, s.base.n, s.base.failures], [1, 1, 1, 0]);
     });
   }
 
@@ -111,17 +107,18 @@ describe("canary Worker", () => {
       await handle(req("decide", { ...decideBody, key: `k${i}` }), vars(), h.deps);
       await h.settle();
     }
-    assert.equal(h.getState().reverted, true);
+    assert.equal((await h.status()).reverted, true);
     const before = h.runs.length;
     const body = (await (await handle(req("decide", decideBody), vars(), h.deps)).json()) as Record<string, unknown>;
     assert.equal(body.route, "base");
     assert.equal(body.fallback, null);
     assert.equal(h.runs.length, before + 1);
     assert.equal(h.runs.at(-1)!.model, "@cf/cloudflare/clef-flash");
-    const status = (await (await handle(req("route"), vars(), h.deps)).json()) as RevertState;
+    const status = (await (await handle(req("route"), vars(), h.deps)).json()) as RouteStatus;
     assert.equal(status.reverted, true);
+    assert.match(status.reason!, /5 of the last 5 tuned requests failed/);
     await handle(req("route/reset", {}), vars(), h.deps);
-    assert.equal(h.getState().reverted, false);
+    assert.equal((await h.status()).reverted, false);
   });
 
   it("serves base in shadow mode and runs tuned on the side", async () => {
@@ -131,7 +128,8 @@ describe("canary Worker", () => {
     assert.equal(body.route, "base");
     assert.deepEqual(h.runs.map((r) => r.metadata.route), ["base", "shadow"]);
     assert.equal(body.log_id, "log-1");
-    assert.deepEqual(h.getState().recent, [false]);
+    const s = await h.status();
+    assert.deepEqual([s.tuned.n, s.tuned.failures, s.base.n], [1, 0, 1]);
   });
 
   it("serves base only when MODE is off or no tuned arm is set", async () => {

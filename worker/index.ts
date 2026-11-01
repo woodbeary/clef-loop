@@ -2,7 +2,8 @@
 // in handler.ts (tested in Node); the revert rule is in src/canary.ts.
 
 import { DurableObject } from "cloudflare:workers";
-import { EMPTY_STATE, parseRevertConfig, recordOutcome, type RevertState } from "../src/canary.ts";
+import { parseRevertConfig } from "../src/canary.ts";
+import { RouteBook, type RouteStatus, type VerdictResult, type WindowRoute } from "../src/route-book.ts";
 import { handle, type AiBinding, type Vars } from "./handler.ts";
 
 export interface Env extends Vars {
@@ -21,7 +22,8 @@ export default {
       ai: env.AI as unknown as AiBinding,
       route: {
         admit: () => stub.admit(),
-        record: (failed) => stub.record(failed),
+        record: (route, failed, key) => stub.record(route, failed, key),
+        verdict: (key, ok) => stub.verdict(key, ok),
         status: () => stub.status(),
         reset: () => stub.reset(),
       },
@@ -30,29 +32,32 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-/** Single-threaded, and record() awaits only storage between its read and write, so updates can't interleave. */
+/** Single-threaded; RouteBook also serializes its own read-modify-write steps. */
 export class RouteState extends DurableObject<Env> {
+  private readonly book: RouteBook;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.book = new RouteBook(ctx.storage, parseRevertConfig(env));
+  }
+
   async admit(): Promise<boolean> {
-    return !(await this.load()).reverted;
+    return this.book.admit();
   }
 
-  async record(failed: boolean): Promise<{ reverted: boolean; reason: string | null }> {
-    const next = recordOutcome(await this.load(), failed, parseRevertConfig(this.env), new Date());
-    await this.ctx.storage.put("state", next);
-    return { reverted: next.reverted, reason: next.reason };
+  async record(route: WindowRoute, failed: boolean, key?: string): Promise<RouteStatus> {
+    return this.book.record(route, failed, key);
   }
 
-  async status(): Promise<{ reverted: boolean; reason: string | null; revertedAt: string | null; window: number; failures: number }> {
-    const s = await this.load();
-    return { reverted: s.reverted, reason: s.reason, revertedAt: s.revertedAt, window: s.recent.length, failures: s.recent.filter(Boolean).length };
+  async verdict(key: string, ok: boolean): Promise<VerdictResult> {
+    return this.book.verdict(key, ok);
   }
 
-  async reset(): Promise<{ reverted: false }> {
-    await this.ctx.storage.put("state", EMPTY_STATE);
-    return { reverted: false };
+  async status(): Promise<RouteStatus> {
+    return this.book.status();
   }
 
-  private async load(): Promise<RevertState> {
-    return (await this.ctx.storage.get<RevertState>("state")) ?? EMPTY_STATE;
+  async reset(): Promise<RouteStatus> {
+    return this.book.reset();
   }
 }

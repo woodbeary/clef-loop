@@ -13,6 +13,7 @@
 
 import { buildCall, parseResult, type CallableArm } from "../src/arms.ts";
 import { chooseRoute, type Mode } from "../src/canary.ts";
+import type { VerdictResult, WindowRoute } from "../src/route-book.ts";
 import { isObject, validateQuestions } from "../src/schema.ts";
 import type { ArmSpec, Decision, Json, Questions } from "../src/types.ts";
 
@@ -26,10 +27,11 @@ export interface AiBinding {
   gateway(id: string): { patchLog(logId: string, data: { feedback?: -1 | 1; score?: number; metadata?: Meta }): Promise<void> };
 }
 
-/** Holds the route's revert window. In the Worker this is a Durable Object. */
+/** Holds the route's revert window (src/route-book.ts). In the Worker this is a Durable Object. */
 export interface RouteStore {
   admit(): Promise<boolean>;
-  record(failed: boolean): Promise<unknown>;
+  record(route: WindowRoute, failed: boolean, key?: string): Promise<unknown>;
+  verdict(key: string, ok: boolean): Promise<VerdictResult>;
   status(): Promise<unknown>;
   reset(): Promise<unknown>;
 }
@@ -98,18 +100,21 @@ async function decide(request: Request, vars: Vars, deps: Deps): Promise<Respons
   if (route === "tuned" && tuned) {
     const ms = Number(vars.TUNED_TIMEOUT_MS || "1500");
     const r = await withTimeout(runArm(deps, vars, tuned, state, questions, { ...meta, route: "tuned" }), ms);
-    deps.waitUntil(deps.route.record(!r.ok));
+    deps.waitUntil(deps.route.record("tuned", !r.ok, r.ok ? requestId : undefined));
     if (r.ok) return json({ decision: r.decision, route: "tuned", fallback: null, log_id: r.logId, request_id: requestId });
     fallback = r.error;
   }
 
   const r = await runArm(deps, vars, base, state, questions, { ...meta, route: fallback ? "fallback" : "base" });
+  deps.waitUntil(deps.route.record("base", !r.ok, r.ok ? requestId : undefined));
   // The shadow call starts after the base call has returned and its log id has been read.
   // env.AI.aiGatewayLogId holds only the last call's id, so running both at once could hand
   // the caller the shadow log's id, and /feedback would label the wrong log.
   if (mode === "shadow" && tuned) {
     deps.waitUntil(
-      runArm(deps, vars, tuned, state, questions, { ...meta, route: "shadow" }).then((s) => deps.route.record(!s.ok)),
+      runArm(deps, vars, tuned, state, questions, { ...meta, route: "shadow" }).then((s) =>
+        deps.route.record("tuned", !s.ok, s.ok ? `${requestId}:shadow` : undefined),
+      ),
     );
   }
   if (!r.ok) return json({ error: `base model failed: ${r.error}`, request_id: requestId }, 502);

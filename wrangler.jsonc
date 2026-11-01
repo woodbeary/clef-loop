@@ -30,8 +30,9 @@
     // Changing this re-buckets keys and starts a fresh revert window.
     "ROUTE_VERSION": "v1",
     "TUNED_TIMEOUT_MS": "1500",
-    // Revert the route when more than 1% of the last 200 tuned requests fell back
-    // (judged once at least 50 are in the window).
+    // Revert the route when the 95% Wilson lower bound of tuned's failure rate over its
+    // last 200 requests is above 1%, or above base's own rate over its last 200 if that is
+    // higher (judged once 50 tuned requests are in). Failures include validator rejects.
     "REVERT_WINDOW": "200",
     "REVERT_MIN_SAMPLES": "50",
     "REVERT_MAX_FAILURE_RATE": "0.01"
