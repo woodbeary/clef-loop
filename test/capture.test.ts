@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
+import { promisify } from "node:util";
 import {
   applyConsent,
   captureFromCsv,
@@ -98,6 +102,26 @@ describe("captureFromCsv", () => {
     assert.deepEqual(csvConsent(captureFromCsv(tenanted, QUESTIONS), consent).records.map((r) => r.id), ["a"]);
     const own = [header, "b,2026-09-10T00:00:00Z,y,skip,human,2026-09-10T00:01:00Z,false,"].join("\n");
     assert.deepEqual(csvConsent(captureFromCsv(own, QUESTIONS), undefined).records.map((r) => r.id), ["b"]);
+  });
+});
+
+describe("clef-loop build --csv (the CLI)", () => {
+  it("refuses a CSV whose rows name a tenant without --consent, and builds it with one", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clef-loop-cli-"));
+    try {
+      const [header, ...rows] = (await readFile("fixtures/leads.csv", "utf8")).trim().split("\n");
+      await writeFile(join(dir, "t.csv"), [`${header},tenant`, ...rows.slice(0, 40).map((r) => `${r},acme`)].join("\n"));
+      await writeFile(join(dir, "consent.json"), JSON.stringify({ tenants: { acme: { from: "2026-01-01T00:00:00Z" } } }));
+      const cli = (...extra: string[]) =>
+        promisify(execFile)(process.execPath, ["src/cli.ts", "build", "--csv", join(dir, "t.csv"), "--questions", "fixtures/questions.json", "--names", "fixtures/names.txt", ...extra]);
+      await assert.rejects(cli("--out", join(dir, "refused")), (e: { code?: number; stderr?: string }) => e.code === 1 && /no --consent FILE given/.test(e.stderr ?? ""));
+      const ok = await cli("--consent", join(dir, "consent.json"), "--out", join(dir, "built"));
+      assert.match(ok.stdout, /train 32, held-out 8/);
+      const manifest = JSON.parse(await readFile(join(dir, "built", "manifest.json"), "utf8"));
+      assert.deepEqual(manifest.tenants, { acme: 40 });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
