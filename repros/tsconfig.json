@@ -1,0 +1,4 @@
+{
+  "extends": "../validator/tsconfig.json",
+  "include": ["worker.ts"]
+}

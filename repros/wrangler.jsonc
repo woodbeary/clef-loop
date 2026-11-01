@@ -1,0 +1,10 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "clef-loop-repros",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  "ai": { "binding": "AI" },
+  "vars": { "GATEWAY_ID": "clef-loop-repros" },
+  "workers_dev": true,
+  "preview_urls": false
+}
