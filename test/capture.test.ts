@@ -5,6 +5,7 @@ import {
   applyConsent,
   captureFromCsv,
   captureFromGateway,
+  csvConsent,
   parseConsent,
   parseDecision,
   systemOneInput,
@@ -87,6 +88,16 @@ describe("captureFromCsv", () => {
     assert.match(why.none, /no tenant/);
     assert.throws(() => parseConsent('{"acme":{}}'), /tenants/);
     assert.throws(() => parseConsent('{"tenants":{"acme":{}}}'), /needs a "from" time/);
+  });
+
+  it("refuses a CSV whose rows name a tenant unless a consent file is given", () => {
+    const header = "id,created_at,state,final,decided_by,decided_at,saw_suggestion,tenant";
+    const tenanted = [header, "a,2026-09-10T00:00:00Z,x,skip,human,2026-09-10T00:01:00Z,false,acme"].join("\n");
+    assert.throws(() => csvConsent(captureFromCsv(tenanted, QUESTIONS), undefined), /no --consent FILE/);
+    const consent = parseConsent(JSON.stringify({ tenants: { acme: { from: "2026-09-01T00:00:00Z" } } }));
+    assert.deepEqual(csvConsent(captureFromCsv(tenanted, QUESTIONS), consent).records.map((r) => r.id), ["a"]);
+    const own = [header, "b,2026-09-10T00:00:00Z,y,skip,human,2026-09-10T00:01:00Z,false,"].join("\n");
+    assert.deepEqual(csvConsent(captureFromCsv(own, QUESTIONS), undefined).records.map((r) => r.id), ["b"]);
   });
 });
 

@@ -67,6 +67,21 @@ export function applyConsent(result: CaptureResult, consent: ConsentFile): Captu
 }
 
 /**
+ * The consent gate for a CSV export. With a consent file, only rows it covers are kept.
+ * Without one, rows that name a tenant are refused outright: they are someone's
+ * captured decisions, so they need a consent file. A CSV with no tenant column is the
+ * team's own decision log and passes through.
+ */
+export function csvConsent(result: CaptureResult, consent: ConsentFile | undefined): CaptureResult {
+  if (consent) return applyConsent(result, consent);
+  const tenants = new Set(result.records.flatMap((r) => (r.tenant ? [r.tenant] : [])));
+  if (tenants.size) {
+    throw new Error(`${tenants.size} tenant(s) named in the CSV and no --consent FILE given: rows that name a tenant are exported only under a consent file`);
+  }
+  return result;
+}
+
+/**
  * CSV columns: id, created_at, state, final, decided_by, decided_at, and optionally
  * saw_suggestion (required when decided_by is human), model_output and tenant.
  * `state` may be text or JSON. `final` and `model_output` may be a JSON object of

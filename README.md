@@ -14,7 +14,8 @@ afternoon:
 2. **Label** with a person's final call or a validator's verdict, never the model's own
    answer. Each label says who decided (`decided_by`: human or validator; agent labels
    are refused), when, and whether the person saw the model's suggestion first.
-3. **Split and build datasets.** Export refuses rows without consent. The newest
+3. **Split and build datasets.** Export refuses rows without consent: a gateway export
+   needs a consent file, and so does a CSV whose rows name a tenant. The newest
    decisions are held out. Two training sets are written: Clef System One requests with
    labels, and the `text` CSV that Cloudflare's Workers AI LoRA tutorial specifies.
 4. **Evaluate** base Clef, your tuned model and a frontier model (for example
@@ -63,7 +64,7 @@ every behavior the code relies on.
 
 ```sh
 npm ci
-npm test              # 128 tests
+npm test              # 129 tests
 npm run demo          # build + eval on the synthetic fixtures
 npm run demo:revert   # the canary reverting on validator rejects, locally
 python3 trainer/train.py --train data/demo/clef/train.jsonl --heldout data/demo/clef/heldout.jsonl --dry-run
@@ -94,7 +95,8 @@ npx wrangler deploy
 # 2-3. Export, redact, split, build. consent.json: {"tenants": {"acme": {"from": "2026-10-01T00:00:00Z"}}}
 node src/cli.ts audit --gateway clef-loop --labels-from https://<your canary> --consent consent.json --limit 50
 node src/cli.ts build --gateway clef-loop --labels-from https://<your canary> --consent consent.json --out data/v1
-#    ...or from a CSV with id, created_at, state, final, decided_by, decided_at, saw_suggestion:
+#    ...or from a CSV with id, created_at, state, final, decided_by, decided_at, saw_suggestion
+#    (add a tenant column and --consent consent.json when the rows are other people's):
 node src/cli.ts build --csv decisions.csv --questions questions.json --out data/v1
 
 # 4. Evaluate every arm on the same held-out set.
@@ -171,7 +173,7 @@ blame tuned.
 
 Run on 2026-11-01 with Node 22.22 and Python 3.13:
 
-- `npm test`: 128 tests, all passing. Beyond v0.1.0's coverage, they drive the Worker's
+- `npm test`: 129 tests, all passing. Beyond v0.1.0's coverage, they drive the Worker's
   capture shim (redaction before the call, `collectLog` per tenant, the residual-PII
   gate, the metadata-only event), labels by request id (agent labels refused, the
   human-over-validator rule, paging, deletion, two calls finishing out of order), the

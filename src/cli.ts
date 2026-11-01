@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { buildCall, isTemplate, type CallableArm } from "./arms.ts";
 import { byomPlan, checkCog } from "./byom.ts";
-import { applyConsent, captureFromCsv, captureFromGateway, parseConsent, workerLabels, type CaptureResult } from "./capture.ts";
+import { captureFromCsv, captureFromGateway, csvConsent, parseConsent, workerLabels, type CaptureResult } from "./capture.ts";
 import { restTransport } from "./cloudflare.ts";
 import { build, readClefJsonl, redactRecords } from "./dataset.ts";
 import { evaluate, parseArm, renderMarkdown } from "./evaluate.ts";
@@ -33,7 +33,8 @@ const USAGE = `clef-loop: capture labeled decisions, redact, split, evaluate, de
 
   --gateway needs --consent FILE ({"tenants": {"<id>": {"from": ISO, "until"?: ISO}}}) and
   --labels-from URL (the canary Worker; labels are joined to logs by request id). With --csv,
-  --consent keeps only rows whose tenant column it covers.
+  --consent keeps only rows whose tenant column it covers, and a CSV whose rows name a tenant
+  needs it.
 
 Environment: CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, AI_GATEWAY_ID (default clef-loop),
 CLEF_LOOP_TOKEN (for --labels-from), SYSTEMONE_URL_TOKEN (optional, for systemone-url arms).`;
@@ -79,8 +80,7 @@ async function capture(values: Record<string, string | boolean | string[] | unde
   const consent = values.consent ? parseConsent(await readFile(String(values.consent), "utf8")) : undefined;
   if (values.csv) {
     if (!questions) throw new Error("--csv needs --questions (a JSON file of the question schema)");
-    const captured = captureFromCsv(await readFile(String(values.csv), "utf8"), questions);
-    return consent ? applyConsent(captured, consent) : captured;
+    return csvConsent(captureFromCsv(await readFile(String(values.csv), "utf8"), questions), consent);
   }
   if (values.gateway) {
     if (!consent) throw new Error("--gateway needs --consent FILE: logs are exported only for tenants who opted in");
