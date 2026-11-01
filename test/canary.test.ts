@@ -45,6 +45,13 @@ describe("judge: revert on a Wilson lower bound, against base's own rate", () =>
     }
   });
 
+  it("takes 2 failures in 50 tuned requests, 3 in 100 and 5 in 200, as docs/MEASURING.md says", () => {
+    for (const [n, needed] of [[50, 2], [100, 3], [200, 5]]) {
+      assert.equal(judge(fails(n - needed, needed), [], cfg).revert, true, `${needed} of ${n}`);
+      assert.equal(judge(fails(n - needed + 1, needed - 1), [], cfg).revert, false, `${needed - 1} of ${n}`);
+    }
+  });
+
   it("reverts once the 95% lower bound passes the limit", () => {
     const j = judge(fails(47, 3), [], cfg);
     assert.equal(j.revert, true);

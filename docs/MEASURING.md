@@ -70,8 +70,8 @@ with their route. Then canary: `MODE=canary` with a small `CANARY_PERCENT`.
 - Count wrong answers too. With the validator bound (or posting to `/outcome`), a
   well-formed wrong answer is a failure in its route's window. The route reverts when the
   lower end of the 95% Wilson interval for tuned's failure rate is above 1%, or above
-  base's own rate when that is higher. At 50 tuned requests that takes 3 failures against a
-  base that never fails; one transient 429 doesn't.
+  base's own rate when that is higher. Against a base that never fails, that takes 2
+  failures in 50 tuned requests, 3 in 100 and 5 in 200; one transient 429 never does.
 
 ## Latency
 
