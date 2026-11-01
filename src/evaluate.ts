@@ -50,6 +50,12 @@ export interface ArmReport {
   failures: { call: number; format: number };
   /** Per question; null for arms that return no probabilities. */
   calibration: Record<string, CalibrationReport | null>;
+  /**
+   * Exact match split by whether the person saw the model's suggestion before deciding.
+   * A model that agrees far more with labels made after seeing its suggestion is being
+   * graded partly on its own answers. Null when the records aren't split both ways.
+   */
+  bySuggestion: { saw: { n: number; exactMatch: number }; unseen: { n: number; exactMatch: number } } | null;
 }
 
 export interface EvalReport {
@@ -204,7 +210,22 @@ function report(arm: NamedArm, records: DecisionRecord[], outcomes: ArmOutcome[]
     errors,
     failures: { call: errors.filter((e) => e.kind === "call").length, format: errors.filter((e) => e.kind === "format").length },
     calibration,
+    bySuggestion: splitBySuggestion(records, outcomes),
   };
+}
+
+function splitBySuggestion(records: DecisionRecord[], outcomes: ArmOutcome[]): ArmReport["bySuggestion"] {
+  const part = (saw: boolean) => {
+    const idx = records.flatMap((r, i) => (r.decidedBy === "human" && r.sawSuggestion === saw ? [i] : []));
+    const right = idx.filter((i) => {
+      const o = outcomes[i];
+      return o.ok && sameDecision(o.decision, records[i].final, records[i]);
+    }).length;
+    return { n: idx.length, exactMatch: idx.length ? right / idx.length : 0 };
+  };
+  const saw = part(true);
+  const unseen = part(false);
+  return saw.n && unseen.n ? { saw, unseen } : null;
 }
 
 function calibrate(qid: string, options: string[], labels: string[], outcomes: ArmOutcome[], abstainBelow?: number): CalibrationReport | null {
@@ -296,6 +317,23 @@ export function renderMarkdown(rep: EvalReport, note?: string): string {
         .map(([o, s]) => `${o} ${num(s.precision)} / ${num(s.recall)}`)
         .join("; ");
       lines.push(`| ${a.name} | ${pct(q.accuracy)} (${pct(q.ci95[0])} to ${pct(q.ci95[1])}) | ${q.macroF1.toFixed(3)} | ${cls} |`);
+    }
+  }
+  const split = rep.arms.filter((a) => a.bySuggestion);
+  if (split.length) {
+    lines.push(
+      "",
+      "## Anchoring check",
+      "",
+      "Exact match on human labels, split by whether the person saw the model's suggestion first. A large gap for the " +
+        "logged (replay) arm means labels lean on the model's own answers.",
+      "",
+      "| Arm | Saw the suggestion | Didn't see it |",
+      "|---|---|---|",
+    );
+    for (const a of split) {
+      const b = a.bySuggestion!;
+      lines.push(`| ${a.name} | ${pct(b.saw.exactMatch)} of ${b.saw.n} | ${pct(b.unseen.exactMatch)} of ${b.unseen.n} |`);
     }
   }
   for (const qid of qids) {

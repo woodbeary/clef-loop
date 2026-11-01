@@ -132,3 +132,27 @@ describe("evaluate with calibration", () => {
     assert.match(md, /\| gpt \| chat \| 0\.0% \| 0\/60 \| \d+ \| \d+ \| 0 \| 60 \|/);
   });
 });
+
+describe("anchoring check", () => {
+  it("splits agreement by whether the person saw the suggestion", async () => {
+    const mk = (i: number, saw: boolean, label: string, logged: string) => ({
+      id: `r${i}`,
+      createdAt: `2026-10-01T00:00:0${i}.000Z`,
+      state: { i },
+      questions: QUESTIONS,
+      final: { decision: label },
+      modelOutput: { decision: logged },
+      decidedBy: "human" as const,
+      decidedAt: `2026-10-01T00:01:0${i}.000Z`,
+      sawSuggestion: saw,
+      source: "dataset" as const,
+    });
+    const records = [mk(0, true, "skip", "skip"), mk(1, true, "accept", "accept"), mk(2, false, "skip", "accept"), mk(3, false, "accept", "accept")];
+    const rep = await evaluate(records, [parseArm("logged=replay")], { runId: "a" });
+    assert.deepEqual(rep.arms[0].bySuggestion, { saw: { n: 2, exactMatch: 1 }, unseen: { n: 2, exactMatch: 0.5 } });
+    assert.match(renderMarkdown(rep), /\| logged \| 100\.0% of 2 \| 50\.0% of 2 \|/);
+    const allSaw = await evaluate(records.map((r) => ({ ...r, sawSuggestion: true })), [parseArm("logged=replay")], { runId: "b" });
+    assert.equal(allSaw.arms[0].bySuggestion, null);
+  });
+});
+
