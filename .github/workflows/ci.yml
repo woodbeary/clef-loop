@@ -38,6 +38,10 @@ jobs:
       - name: Cog predictor tests (no GPU, no weights)
         working-directory: byom
         run: python -m unittest -v test_predict
+      - run: pip install numpy
+      - name: Trainer tests (no GPU, no torch, no weights)
+        working-directory: trainer
+        run: python -m unittest -v test_trainer
 
   secrets:
     runs-on: ubuntu-latest

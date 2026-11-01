@@ -1,0 +1,6 @@
+# Dry runs and tests need only NumPy. A full run on a GPU also needs the rest, matching
+# the versions the Clef-flash model card was tested with.
+numpy
+torch==2.11.0
+transformers==5.10.2
+safetensors
