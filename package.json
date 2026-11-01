@@ -1,7 +1,7 @@
 {
   "name": "clef-loop",
-  "version": "0.1.0",
-  "description": "Capture labeled decisions, redact PII, build Clef and Workers AI LoRA datasets, evaluate base vs tuned vs frontier, and canary the tuned model on Cloudflare with automatic fallback.",
+  "version": "0.2.0",
+  "description": "Capture opted-in, redacted, human- or validator-labeled decisions, build Clef and Workers AI LoRA datasets, evaluate base vs tuned vs frontier with calibration, tune Clef-flash, and canary the tune on Cloudflare with fallback and a validator-driven revert.",
   "license": "MIT",
   "author": "Jacob Lopez",
   "type": "module",

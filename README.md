@@ -7,34 +7,43 @@ clef-loop is the loop Cloudflare describes for [Clef](https://developers.cloudfl
 its open decision models on Workers AI, built as a small tool you can read in an
 afternoon:
 
-1. **Capture** labeled decisions: what the model saw, what it answered, and what the
-   human finally decided. Input is AI Gateway logs or a CSV export.
-2. **Redact** PII before anything is written, then audit what's left. The build refuses
-   to write if anything still looks like PII.
-3. **Split and build datasets.** The newest decisions are held out. Two training sets are
-   written: Clef System One requests with labels, and the `text` CSV that Cloudflare's
-   Workers AI LoRA tutorial specifies.
+1. **Capture** decisions through the canary Worker, only for tenants who opted in. The
+   Worker redacts every state before the model or AI Gateway sees it, and turns gateway
+   logging on per request (`collectLog: true`) only for a consenting tenant. Everyone
+   else gets a metadata-only event: pTop, margin, latency and a state hash.
+2. **Label** with a person's final call or a validator's verdict, never the model's own
+   answer. Each label says who decided (`decided_by`: human or validator; agent labels
+   are refused), when, and whether the person saw the model's suggestion first.
+3. **Split and build datasets.** Export refuses rows without consent. The newest
+   decisions are held out. Two training sets are written: Clef System One requests with
+   labels, and the `text` CSV that Cloudflare's Workers AI LoRA tutorial specifies.
 4. **Evaluate** base Clef, your tuned model and a frontier model (for example
-   `openai/gpt-5.5`) on the same held-out set with the same metric. Failures count as
-   wrong, and arms are compared pairwise.
-5. **Deploy** the tuned model behind a canary Worker. Per request, it falls back to base
-   when the tuned model errors, times out or gives an answer that doesn't fit. When
-   failures pass a threshold, the whole route reverts automatically. Every call is logged
-   through AI Gateway, so production builds the next training set.
+   `openai/gpt-5.5`, asked for structured output) on the same held-out set with the same
+   metric. Failures count as wrong, arms are compared pairwise, and Clef's probabilities
+   are scored for calibration (Brier, reliability, coverage when low-confidence answers
+   go to a person).
+5. **Tune** Clef-flash on the open weights: the joint head plus low-rank adapters, with
+   the backbone frozen, on cross-entropy plus Brier. That is supervised training; the
+   dry run needs no GPU.
+6. **Deploy** behind the canary Worker. Per request, it falls back to base when the tuned
+   model errors, times out or gives an answer that doesn't fit. A validator in a
+   Container (or any caller of `POST /outcome`) reports well-formed wrong answers too, and
+   the route reverts when the 95% lower bound of tuned's failure rate passes base's own.
 
 ```
- your app ──► canary Worker ──► AI Gateway ──► base Clef  /  tuned model (LoRA or BYOM)
-                 │    ▲                │
-   staff decide ─┘    └ revert window  └─► logs + /feedback labels
-                      (Durable Object)        │
-                                              ▼
-            clef-loop build: capture → redact → split → datasets → eval → tune → deploy
+ your app ──► canary Worker ──► AI Gateway ──► base Clef  /  tuned model (LoRA, self-hosted, or BYOM)
+  (tenant)    redact, consent     (logs only            │
+              │  ▲   │            opted-in tenants)     ▼
+ staff ──► /feedback │ └─► validator Container ──► verdict ──► revert window (Durable Object)
+              │      └──── labels by request id (Durable Object per tenant)
+              ▼
+ clef-loop build (consent file + labels joined by req) → datasets → eval → trainer → canary
 ```
 
-TypeScript for everything that touches Cloudflare: the CLI, the API clients and the
-Worker. Python only where the documented path is Python: the Cog package for Bring Your
-Own Model. The TypeScript has no runtime dependencies, and the CLI runs directly on Node
-22.18+ with no build step.
+TypeScript for everything that touches Cloudflare: the CLI, the API clients, the Worker
+and the validator. Python only where the documented path is Python: the Clef-flash trainer
+and the Cog package for Bring Your Own Model. The TypeScript has no runtime dependencies,
+and the CLI runs directly on Node 22.18+ with no build step.
 
 ## What works today, and what needs your account
 
@@ -42,9 +51,9 @@ Own Model. The TypeScript has no runtime dependencies, and the CLI runs directly
 | --- | --- | --- | --- |
 | Capture | CSV export | AI Gateway logs (`--gateway`) | |
 | Redact, split, datasets | Yes | Yes | |
-| Train | | Workers AI LoRA, through Cloudflare's [AutoTrain tutorial](https://developers.cloudflare.com/workers-ai/guides/tutorials/fine-tune-models-with-autotrain/) | Clef itself, through Cloudflare's fine-tuning service |
+| Train | `trainer/train.py --dry-run`: data checks, baseline, and what is trained and frozen | Workers AI LoRA, through Cloudflare's [AutoTrain tutorial](https://developers.cloudflare.com/workers-ai/guides/tutorials/fine-tune-models-with-autotrain/) | Clef-flash itself: `trainer/train.py` on a rented GPU, after its scoring hook is written against the release code |
 | Evaluate | `replay` and `majority` baselines; any self-hosted System One server | Base Clef, LoRA arms, frontier models | A BYOM-deployed tuned Clef |
-| Deploy | `wrangler deploy --dry-run` | Canary Worker with a LoRA as the tuned arm | Canary with a BYOM tuned Clef |
+| Deploy | `wrangler deploy --dry-run`; `npm run demo:revert` | Canary Worker with a LoRA as the tuned arm, and the validator Container | Canary with a BYOM tuned Clef |
 
 [docs/GAPS.md](docs/GAPS.md) lists each gated or undocumented step and what to verify on
 the first real run. [docs/SOURCES.md](docs/SOURCES.md) cites the Cloudflare page behind
@@ -54,8 +63,10 @@ every behavior the code relies on.
 
 ```sh
 npm ci
-npm test          # 84 tests
-npm run demo      # build + eval on the synthetic fixtures
+npm test              # 128 tests
+npm run demo          # build + eval on the synthetic fixtures
+npm run demo:revert   # the canary reverting on validator rejects, locally
+python3 trainer/train.py --train data/demo/clef/train.jsonl --heldout data/demo/clef/heldout.jsonl --dry-run
 ```
 
 `npm run demo` runs the first steps on `fixtures/leads.csv`: 303 synthetic home-service
@@ -64,34 +75,46 @@ It writes `data/demo/` and a report like [examples/synthetic-report.md](examples
 The labels come from a rule, so those numbers test the pipeline and say nothing about
 any model.
 
+`npm run demo:revert` runs the canary's request handler in Node with the validator's
+server on loopback: base answers with the fixtures' rule and "tuned" is a stub that
+always gives a well-formed, often wrong answer. The route reverts after 50 tuned
+requests on validator rejects alone, and says why.
+
 ## Run it on your decisions
 
 ```sh
-export CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... AI_GATEWAY_ID=clef-loop
+export CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... AI_GATEWAY_ID=clef-loop CLEF_LOOP_TOKEN=...
 
-# 1-3. Capture, redact, split, build. From AI Gateway logs labeled through /feedback:
-node src/cli.ts audit --gateway clef-loop --limit 50          # read a redacted sample first
-node src/cli.ts build --gateway clef-loop --out data/v1 --names crm-names.txt
-#    ...or from a CSV with id, created_at, state, final, model_output:
+# 1. Canary first: set CAPTURE_TENANTS to the tenants who opted in, then deploy.
+#    Your app sends { key, tenant, state, questions } to /decide, and later
+#    { request_id, tenant, final, decided_by, decided_at, saw_suggestion } to /feedback.
+npx wrangler secret put CLEF_LOOP_TOKEN
+npx wrangler deploy
+
+# 2-3. Export, redact, split, build. consent.json: {"tenants": {"acme": {"from": "2026-10-01T00:00:00Z"}}}
+node src/cli.ts audit --gateway clef-loop --labels-from https://<your canary> --consent consent.json --limit 50
+node src/cli.ts build --gateway clef-loop --labels-from https://<your canary> --consent consent.json --out data/v1
+#    ...or from a CSV with id, created_at, state, final, decided_by, decided_at, saw_suggestion:
 node src/cli.ts build --csv decisions.csv --questions questions.json --out data/v1
-
-# Train a LoRA on data/v1/lora/train.csv with the AutoTrain notebook (lora-r 8, no
-# quantization), download adapter_config.json + adapter_model.safetensors, then:
-node src/cli.ts lora check adapters/v1 --model @cf/mistral/mistral-7b-instruct-v0.2-lora --set-model-type mistral
-node src/cli.ts lora upload adapters/v1 --model @cf/mistral/mistral-7b-instruct-v0.2-lora --name leads-v1 --execute
 
 # 4. Evaluate every arm on the same held-out set.
 node src/cli.ts eval --heldout data/v1/clef/heldout.jsonl --train data/v1/clef/train.jsonl \
   --arm logged=replay --arm majority=majority \
   --arm clef=systemone:@cf/cloudflare/clef-flash \
-  --arm tuned='lora:@cf/mistral/mistral-7b-instruct-v0.2-lora|leads-v1|mistral' \
   --arm gpt=chat:openai/gpt-5.5 \
-  --out reports/v1
+  --abstain-below 0.8 --out reports/v1
 # Add --dry-run to print the first request for each arm without sending anything.
 
-# 5. Canary. Set TUNED_ARM in wrangler.jsonc, start with MODE=shadow, then canary.
-npx wrangler secret put CLEF_LOOP_TOKEN
-npx wrangler deploy
+# 5. Tune Clef-flash on a GPU box with the open weights (dry run first, anywhere):
+python3 trainer/train.py --train data/v1/clef/train.jsonl --heldout data/v1/clef/heldout.jsonl \
+  --model-dir weights/clef-flash --dry-run
+#    ...or tune a Workers AI LoRA on data/v1/lora/train.csv with the AutoTrain notebook, then:
+node src/cli.ts lora check adapters/v1 --model @cf/mistral/mistral-7b-instruct-v0.2-lora --set-model-type mistral
+node src/cli.ts lora upload adapters/v1 --model @cf/mistral/mistral-7b-instruct-v0.2-lora --name leads-v1 --execute
+
+# 6. Set TUNED_ARM in wrangler.jsonc, start with MODE=shadow, then canary. Optionally deploy
+#    the validator (Docker running) and bind it as VALIDATOR:
+npx wrangler deploy -c validator/wrangler.jsonc
 ```
 
 A tuned Clef served from your own GPU box (the model card documents SGLang's
@@ -106,13 +129,19 @@ All routes need `Authorization: Bearer <CLEF_LOOP_TOKEN>`.
 
 | Route | Body | Does |
 | --- | --- | --- |
-| `POST /decide` | `{ key?, state, questions }` | Picks base or tuned (sticky per `key`). Falls back to base on tuned failure. Returns `{ decision, route, fallback, log_id, request_id }`. |
-| `POST /feedback` | `{ log_id, final, route }` | Attaches the human's final decision to the AI Gateway log. This is what `build --gateway` reads. |
-| `GET /route` | | Revert state: failures in the window, and whether and why the route reverted. |
+| `POST /decide` | `{ key?, tenant?, state, questions }` | Redacts the state, picks base or tuned (sticky per `key`), falls back to base on tuned failure, and logs the call in AI Gateway only for a tenant in `CAPTURE_TENANTS`. Returns `{ decision, route, fallback, captured, answers: { q: { p_top, margin } }, needs_person, request_id }`. |
+| `POST /feedback` | `{ request_id, tenant, final, decided_by, decided_at, saw_suggestion }` | Stores the label by request id. `decided_by` is `human` or `validator`; `agent` gets 422. Opted-in tenants only. |
+| `GET /labels?tenant=` | | Pages through a tenant's labels; `build --gateway` joins them to logs by request id. |
+| `DELETE /labels?tenant=` | | Deletes a tenant's labels when consent is withdrawn. |
+| `POST /outcome` | `{ request_id, ok, reason? }` | A validator's verdict on what was served. A reject counts as a failure in that route's revert window, once. |
+| `GET /route` | | Revert state: both windows, the limit, and whether and why the route reverted. |
 | `POST /route/reset` | | Clears a revert after you've fixed the cause. |
 
-By default the route reverts when more than 1% of the last 200 tuned requests fell back,
-judged once 50 are in the window (`REVERT_*` in `wrangler.jsonc`).
+The route reverts when the lower end of the 95% Wilson interval for tuned's failure rate
+over its last 200 requests is above 1%, or above base's own failure rate when that is
+higher, judged once 50 tuned requests are in (`REVERT_*` in `wrangler.jsonc`). One
+transient 429 doesn't revert a good canary, and an outage that hits both routes doesn't
+blame tuned.
 
 ## Design choices
 
@@ -121,47 +150,61 @@ judged once 50 are in the window (`REVERT_*` in `wrangler.jsonc`).
 - **Failures count as wrong.** A timeout, a 429 or an unparseable answer stays in the
   denominator. Answers are parsed strictly: "I would accept this" is a miss, not an
   accept.
+- **Nothing reaches a training file unless a tenant opted in, the Worker redacted it
+  before the gateway saw it, and a person or a validator supplied the label.** The model
+  serves on the same redacted state it is trained on.
+- **Labels are joined by request id, not by gateway log id.** `env.AI.aiGatewayLogId`
+  holds only the most recent call's id, so the Worker never reads it.
 - **Eval traffic is tagged** (`clef_loop_eval` metadata) and skipped by capture, so
   evaluating never contaminates the next training set.
 - **One set of request builders and parsers** (`src/arms.ts`) serves both the eval CLI
   and the Worker, so the eval measures what production runs.
-- **The canary watches failures, not quality.** Quality shows up in the human labels,
-  which you compare per route over the same days. See [docs/MEASURING.md](docs/MEASURING.md).
+- **The canary counts validator rejects as failures.** A well-formed wrong answer is what
+  hurts a customer, so the validator's verdicts feed the same window as errors and
+  timeouts. Human labels still give the fuller comparison per route over the same days.
+  See [docs/MEASURING.md](docs/MEASURING.md).
+- **Calibration is measured, not assumed.** Clef returns a probability for every option;
+  the eval reports Brier and reliability, and `--abstain-below` (or the Worker's
+  `ABSTAIN_BELOW`) sends low-confidence answers to a person.
 
 ## What was tested
 
-Run on 2026-10-31 with Node 22.22 and Python 3.13:
+Run on 2026-11-01 with Node 22.22 and Python 3.13:
 
-- `npm test`: 84 tests, all passing. They cover the documented Clef request and response
-  shapes; every redaction pattern and the residual audit; the CSV parser; the time split
-  and dedupe; dataset files (no PII left in any of them, AutoTrain CSV format, counts that
-  add up); the AI Gateway exporter against a fake of the logs API (paging, eval-tag
-  skipping, both body shapes); every arm's request and parser; metrics checked against
-  hand-computed values (precision and recall, Wilson interval, exact McNemar); the REST
-  transport (endpoints, headers, retries); one eval over real HTTP against a local
-  System One server; the LoRA adapter checks and upload calls; the canary rules; the
-  Worker's handler driven end to end with a fake AI binding (canary, fallback on error,
-  bad answer and timeout, auto-revert, shadow, feedback, auth); fixture reproducibility;
-  and a scan for ids, contact details and secrets in the tree.
-- `python -m unittest` in `byom/`: 5 tests for the Cog predictor's validation, weights
-  overlay and I/O. Clef itself isn't loaded.
-- `npm run typecheck` for the CLI and the Worker, and `wrangler deploy --dry-run` to
-  bundle the Worker.
-- [detect-secrets](https://github.com/Yelp/detect-secrets) 1.5.0 over the tree and every
-  commit, with no findings.
+- `npm test`: 128 tests, all passing. Beyond v0.1.0's coverage, they drive the Worker's
+  capture shim (redaction before the call, `collectLog` per tenant, the residual-PII
+  gate, the metadata-only event), labels by request id (agent labels refused, the
+  human-over-validator rule, paging, deletion, two calls finishing out of order), the
+  Wilson revert rule against base's rate, `/outcome`, the validator's server on loopback
+  driving a revert on well-formed wrong answers, consent windows and the label join in
+  the gateway exporter, calibration math by hand, structured output for the chat arm,
+  the anchoring check, the revert demo and the repro scripts.
+- `python -m unittest` in `byom/` (5 tests) and in `trainer/` (11 tests; the torch parity
+  test is skipped where torch isn't installed, as it wasn't here).
+- `npm run typecheck` for the CLI, the canary Worker, the validator Worker and the repro
+  Worker; `wrangler deploy --dry-run` bundles the canary, and the validator Worker with
+  `--containers-rollout=none`.
+- The validator's server run as its container would run it (`node server.ts`), answering
+  `/health` and `/verdict` on loopback.
 
-**Not tested:** no call has been made to Cloudflare from this repo, no Clef weights have
-been loaded, no Cog image has been built, and no LoRA has been trained. Those steps need
-an account, a GPU or gated access, as listed above.
+**Not tested:** no call has been made to Cloudflare or Hugging Face from this repo, no Clef
+weights have been loaded, the trainer's full run has never executed (no torch, no GPU,
+and its scoring hook needs the release code), the validator's image hasn't been built (no
+Docker daemon here), no Cog image has been built, and no LoRA has been trained.
 
 ## Layout
 
 ```
-src/        CLI and library (capture, redact, split, dataset, arms, evaluate, metrics, lora, byom, canary)
-worker/     canary Worker: handler.ts (logic), index.ts (wiring and the Durable Object)
+src/        CLI and library (capture, redact, split, dataset, arms, evaluate, metrics, calibration,
+            labels, route-book, lora, byom, canary)
+worker/     canary Worker: handler.ts (logic), index.ts (wiring and the Durable Objects)
+validator/  the validator: a Node server, its Dockerfile, and the Worker that runs it as a Container
+trainer/    supervised Clef-flash trainer (data checks, objective, freeze plan, dry run, tests)
+repros/     minimal repros for the platform gaps in docs/GAPS.md (dry run by default)
 byom/       Cog package for a tuned Clef (cog.yaml, predict.py, tests)
 fixtures/   synthetic decisions, regenerated by scripts/make-fixtures.ts
 docs/       SOURCES, GAPS, MEASURING
+scripts/    fixture generator and the revert demo
 test/       node:test suites
 ```
 

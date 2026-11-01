@@ -41,7 +41,9 @@ export function checkCog(files: CogFiles): { errors: string[]; warnings: string[
 
 export function byomPlan(tag: string): string[] {
   return [
-    "1. Put the tuned weights in byom/weights/tuned/ (files there replace the same files in the base snapshot).",
+    "1. Put the tuned weights in byom/weights/tuned/ (files there replace the same files in the base snapshot):",
+    "   trainer/train.py writes joint_head.safetensors there; fold its merged_adapters.safetensors into the",
+    "   backbone shards first and put the changed shards there under their original names.",
     "   Optional: put the base snapshot in byom/weights/base/ so the image doesn't download it at startup.",
     `2. cog build -t ${tag}        # in byom/, on a machine with Docker`,
     `3. cog predict -i request="$(cat ../fixtures/systemone-request.json)"   # smoke test on a GPU box`,
