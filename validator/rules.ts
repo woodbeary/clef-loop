@@ -2,7 +2,8 @@
 // decides from the facts of the case, never from the model's answer, which it is never
 // sent. Replace verdict() with your own check: for a screen check, the state your test
 // page knows it rendered; for an agent action, whether the next step succeeded.
-// Return null when the check can't tell, and no verdict is recorded.
+// Return null when the check can't tell, and no verdict is recorded. The canary Worker
+// also ignores a verdict that isn't an allowed option for every question.
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type Decision = Record<string, string>;

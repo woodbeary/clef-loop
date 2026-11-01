@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Label } from "../src/labels.ts";
 import type { RouteStatus } from "../src/route-book.ts";
-import { authorized, handle, stateHash, type AiBinding } from "../worker/handler.ts";
+import { authorized, handle, parseAbstainBelow, stateHash, type AiBinding } from "../worker/handler.ts";
 import { QUESTIONS } from "../scripts/synthetic.ts";
 import { decideBody, harness, req, TOKEN, vars } from "./worker-harness.ts";
 
@@ -272,6 +272,14 @@ describe("canary Worker", () => {
       const ok = (await (await handle(req("decide", decideBody), vars({ MODE: "off", ABSTAIN_BELOW: "0.75" }), h.deps)).json()) as Record<string, unknown>;
       assert.deepEqual(ok.needs_person, []);
       assert.deepEqual(h.events.map((e) => e.needs_person), [["decision"], []]);
+    });
+
+    it("refuses an ABSTAIN_BELOW that isn't a probability instead of silently never flagging", async () => {
+      assert.equal(parseAbstainBelow(undefined), null);
+      assert.equal(parseAbstainBelow(""), null);
+      assert.equal(parseAbstainBelow("0.8"), 0.8);
+      for (const bad of ["80", "80%", "high", "-0.1"]) assert.throws(() => parseAbstainBelow(bad), /ABSTAIN_BELOW must be a probability/);
+      await assert.rejects(handle(req("decide", decideBody), vars({ MODE: "off", ABSTAIN_BELOW: "80%" }), harness().deps), /ABSTAIN_BELOW/);
     });
 
     it("keeps keys the operator marks as safe, and rejects a malformed tenant", async () => {

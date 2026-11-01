@@ -45,7 +45,8 @@
     "CAPTURE_TENANTS": "",
     // State keys that look sensitive but carry no PII in your data, kept as-is.
     "REDACT_KEEP_KEYS": "",
-    // Flag answers whose top probability is below this for a person to decide. Empty: off.
+    // Flag answers whose top probability is below this (a probability in [0, 1]) for a
+    // person to decide. Empty: off. Anything else fails every /decide rather than flagging nothing.
     "ABSTAIN_BELOW": "",
     // With a validator bound (below), the share of decisions (0-100) it checks.
     "VALIDATE_PERCENT": "100",

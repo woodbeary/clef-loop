@@ -129,6 +129,21 @@ describe("validator in the loop", () => {
     });
   });
 
+  it("ignores a verdict that isn't an allowed option, so a broken check can't revert the route", async () => {
+    await withValidator(() => ({ decision: "maybe" }), async (validator) => {
+      const h = harness("ok");
+      h.deps.validator = validator;
+      const v = vars({ CAPTURE_TENANTS: "acme" });
+      for (let i = 0; i < 6; i++) {
+        await handle(req("decide", { key: `m${i}`, tenant: "acme", state: leads[i].state, questions: QUESTIONS }), v, h.deps);
+        await h.settle();
+      }
+      const s = await h.status();
+      assert.deepEqual([s.tuned.n, s.tuned.failures, s.reverted], [6, 0, false]);
+      assert.equal((await h.labels("acme").list(null, 10)).labels.length, 0);
+    });
+  });
+
   it("scores the shadow arm against the validator without serving it", async () => {
     await withValidator(() => ({ decision: "skip" }), async (validator) => {
       const h = harness("ok");

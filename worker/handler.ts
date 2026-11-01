@@ -29,7 +29,7 @@ import { bucket, chooseRoute, type Mode } from "../src/canary.ts";
 import { LabelError, parseLabel, type Label } from "../src/labels.ts";
 import { auditResidual, redactJson, type RedactionCounts } from "../src/redact.ts";
 import type { VerdictResult, WindowRoute } from "../src/route-book.ts";
-import { isObject, validateQuestions, type Probabilities } from "../src/schema.ts";
+import { isObject, validateDecision, validateQuestions, type Probabilities } from "../src/schema.ts";
 import { canonical } from "../src/split.ts";
 import type { ArmSpec, Decision, Json, Questions } from "../src/types.ts";
 
@@ -158,7 +158,7 @@ async function decide(request: Request, vars: Vars, deps: Deps): Promise<Respons
   const requestId = crypto.randomUUID();
   const now = deps.now ?? (() => Date.now());
   const started = now();
-  const abstainBelow = vars.ABSTAIN_BELOW ? Number(vars.ABSTAIN_BELOW) : null;
+  const abstainBelow = parseAbstainBelow(vars.ABSTAIN_BELOW);
   const respond = async (served: { decision: Decision; probs?: Probabilities }, route: "tuned" | "base", fallback: string | null) => {
     const answers: DecisionEvent["answers"] = {};
     for (const [qid, p] of Object.entries(served.probs ?? {})) {
@@ -285,10 +285,18 @@ async function askValidator(deps: Deps, requestId: string, state: Json, question
     const body = (await res.json()) as { final?: unknown };
     if (!isObject(body.final)) return null;
     const final = body.final as Decision;
-    return Object.keys(questions).every((q) => typeof final[q] === "string") ? final : null;
+    return validateDecision(final, questions).length === 0 ? final : null;
   } catch {
     return null;
   }
+}
+
+/** ABSTAIN_BELOW as a probability, or null when unset. A typo must not silently turn the handoff to a person off. */
+export function parseAbstainBelow(raw: string | undefined): number | null {
+  if (raw === undefined || raw.trim() === "") return null;
+  const p = Number(raw);
+  if (!(p >= 0 && p <= 1)) throw new Error(`ABSTAIN_BELOW must be a probability in [0, 1], got ${JSON.stringify(raw)}`);
+  return p;
 }
 
 function sameDecision(a: Decision, b: Decision, questions: Questions): boolean {
