@@ -11,6 +11,7 @@ export interface Env extends Vars {
   AI: Ai;
   ROUTE: DurableObjectNamespace<RouteState>;
   LABELS: DurableObjectNamespace<Labels>;
+  VALIDATOR?: Fetcher;
   REVERT_WINDOW?: string;
   REVERT_MIN_SAMPLES?: string;
   REVERT_MAX_FAILURE_RATE?: string;
@@ -39,6 +40,7 @@ export default {
       },
       waitUntil: (p) => ctx.waitUntil(p),
       log: (event) => console.log(JSON.stringify(event)),
+      ...(env.VALIDATOR ? { validator: env.VALIDATOR } : {}),
     });
   },
 } satisfies ExportedHandler<Env>;

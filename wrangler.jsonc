@@ -15,6 +15,9 @@
     { "tag": "v2", "new_sqlite_classes": ["Labels"] }
   ],
   "observability": { "enabled": true },
+  // Optional: the validator Container from validator/ (deploy it first with
+  // `npx wrangler deploy -c validator/wrangler.jsonc`, Docker running), then bind it:
+  // "services": [{ "binding": "VALIDATOR", "service": "clef-loop-validator" }],
   // workers.dev is not in your zone, so zone WAF rules don't apply there. The bearer
   // token guards every route; for production, serve it on a Custom Domain or call it
   // through a service binding and set workers_dev to false.
@@ -44,6 +47,8 @@
     "REDACT_KEEP_KEYS": "",
     // Flag answers whose top probability is below this for a person to decide. Empty: off.
     "ABSTAIN_BELOW": "",
+    // With a validator bound (below), the share of decisions (0-100) it checks.
+    "VALIDATE_PERCENT": "100",
     // Revert the route when the 95% Wilson lower bound of tuned's failure rate over its
     // last 200 requests is above 1%, or above base's own rate over its last 200 if that is
     // higher (judged once 50 tuned requests are in). Failures include validator rejects.

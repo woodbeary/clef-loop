@@ -1,0 +1,15 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "clef-loop-validator",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  // Deploy from this directory with Docker running: npx wrangler deploy -c validator/wrangler.jsonc
+  "containers": [{ "class_name": "ValidatorContainer", "image": "./Dockerfile", "max_instances": 2 }],
+  "durable_objects": {
+    "bindings": [{ "name": "VALIDATOR_CONTAINER", "class_name": "ValidatorContainer" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ValidatorContainer"] }],
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": { "enabled": true }
+}

@@ -15,6 +15,8 @@
 //                           -> 204; stores the label (opted-in tenants only; agent labels refused)
 //   GET    /labels?tenant=  -> { labels, next }; the exporter joins them to gateway logs by request id
 //   DELETE /labels?tenant=  -> deletes a tenant's labels, for a withdrawn consent
+//   POST   /outcome         { request_id, ok, reason? } -> a validator's verdict on what was served;
+//                           a reject counts as a failure in that route's revert window
 //   GET    /route           -> revert state
 //   POST   /route/reset     -> clears a revert
 //
@@ -23,7 +25,7 @@
 
 import { buildCall, parseAnswer, type CallableArm } from "../src/arms.ts";
 import { confidence } from "../src/calibration.ts";
-import { chooseRoute, type Mode } from "../src/canary.ts";
+import { bucket, chooseRoute, type Mode } from "../src/canary.ts";
 import { LabelError, parseLabel, type Label } from "../src/labels.ts";
 import { auditResidual, redactJson, type RedactionCounts } from "../src/redact.ts";
 import type { VerdictResult, WindowRoute } from "../src/route-book.ts";
@@ -71,6 +73,8 @@ export interface Vars {
   ABSTAIN_BELOW?: string;
   /** Comma-separated state keys that look sensitive (service_name, ip_range) but carry no PII, kept as-is. */
   REDACT_KEEP_KEYS?: string;
+  /** Share of decisions (0-100) sent to the validator, when one is bound. Default 100. */
+  VALIDATE_PERCENT?: string;
 }
 
 /** One line per /decide, for every tenant. It never holds the state, only a hash of the redacted state. */
@@ -100,6 +104,8 @@ export interface Deps {
   now?(): number;
   /** Wall-clock time for labels. */
   date?(): Date;
+  /** The validator (validator/, a Container behind a service binding). It is sent the redacted state and the questions, never the answer. */
+  validator?: { fetch(request: Request): Promise<Response> };
 }
 
 const TENANT = /^[A-Za-z0-9_.-]{1,64}$/;
@@ -121,6 +127,7 @@ export async function handle(request: Request, vars: Vars, deps: Deps): Promise<
     if (request.method === "POST" && path === "/decide") return await decide(request, vars, deps);
     if (request.method === "POST" && path === "/feedback") return await feedback(request, vars, deps);
     if (path === "/labels" && (request.method === "GET" || request.method === "DELETE")) return await labels(request, deps);
+    if (request.method === "POST" && path === "/outcome") return await outcome(request, deps);
     if (request.method === "GET" && path === "/route") return json(await deps.route.status());
     if (request.method === "POST" && path === "/route/reset") return json(await deps.route.reset());
     return json({ error: "not found" }, 404);
@@ -190,6 +197,21 @@ async function decide(request: Request, vars: Vars, deps: Deps): Promise<Respons
   const mode: Mode = vars.MODE === "shadow" || vars.MODE === "canary" ? vars.MODE : "off";
   const meta: Meta = { route_version: vars.ROUTE_VERSION, req: requestId, tenant };
   const gw = { collectLog: captured };
+  const validatePct = Number(vars.VALIDATE_PERCENT || "100");
+  const truth = deps.validator && bucket(requestId, "validate") < validatePct * 100 ? lazy(() => askValidator(deps, requestId, state, questions)) : null;
+  const validate = (decision: Decision, key: string, recorded: Promise<unknown>) => {
+    if (!truth) return;
+    deps.waitUntil(
+      Promise.all([truth(), recorded]).then(async ([final]) => {
+        if (!final) return;
+        await deps.route.verdict(key, sameDecision(final, decision, questions));
+        if (captured && key === requestId) {
+          const at = (deps.date?.() ?? new Date()).toISOString();
+          await deps.labels(tenant).put({ request_id: requestId, tenant, final, decided_by: "validator", decided_at: at, saw_suggestion: false, recorded_at: at });
+        }
+      }),
+    );
+  };
 
   let route = chooseRoute({
     mode,
@@ -206,21 +228,29 @@ async function decide(request: Request, vars: Vars, deps: Deps): Promise<Respons
   if (route === "tuned" && tuned) {
     const ms = Number(vars.TUNED_TIMEOUT_MS || "1500");
     const r = await withTimeout(runArm(deps, vars, tuned, state, questions, { ...meta, route: "tuned" }, gw), ms);
-    deps.waitUntil(deps.route.record("tuned", !r.ok, r.ok ? requestId : undefined));
-    if (r.ok) return respond(r, "tuned", null);
+    const recorded = deps.route.record("tuned", !r.ok, r.ok ? requestId : undefined);
+    deps.waitUntil(recorded);
+    if (r.ok) {
+      validate(r.decision, requestId, recorded);
+      return respond(r, "tuned", null);
+    }
     fallback = r.error;
   }
 
   const r = await runArm(deps, vars, base, state, questions, { ...meta, route: fallback ? "fallback" : "base" }, gw);
-  deps.waitUntil(deps.route.record("base", !r.ok, r.ok ? requestId : undefined));
+  const recorded = deps.route.record("base", !r.ok, r.ok ? requestId : undefined);
+  deps.waitUntil(recorded);
   if (mode === "shadow" && tuned) {
     deps.waitUntil(
-      runArm(deps, vars, tuned, state, questions, { ...meta, route: "shadow" }, gw).then((s) =>
-        deps.route.record("tuned", !s.ok, s.ok ? `${requestId}:shadow` : undefined),
-      ),
+      runArm(deps, vars, tuned, state, questions, { ...meta, route: "shadow" }, gw).then(async (s) => {
+        const shadowRecorded = deps.route.record("tuned", !s.ok, s.ok ? `${requestId}:shadow` : undefined);
+        if (s.ok) validate(s.decision, `${requestId}:shadow`, shadowRecorded);
+        await shadowRecorded;
+      }),
     );
   }
   if (!r.ok) return json({ error: `base model failed: ${r.error}`, request_id: requestId }, 502);
+  validate(r.decision, requestId, recorded);
   return respond(r, "base", fallback);
 }
 
@@ -232,6 +262,42 @@ async function feedback(request: Request, vars: Vars, deps: Deps): Promise<Respo
   const r = await deps.labels(label.tenant).put(label);
   if (!r.stored) return json({ error: r.reason }, 409);
   return new Response(null, { status: 204 });
+}
+
+async function outcome(request: Request, deps: Deps): Promise<Response> {
+  const body = await readJson(request);
+  if (typeof body.request_id !== "string" || !body.request_id) throw new BadRequest("request_id is required");
+  if (typeof body.ok !== "boolean") throw new BadRequest("ok must be true or false");
+  const r = await deps.route.verdict(body.request_id, body.ok);
+  return json(r, r.route ? 200 : 404);
+}
+
+async function askValidator(deps: Deps, requestId: string, state: Json, questions: Questions): Promise<Decision | null> {
+  try {
+    const res = await deps.validator!.fetch(
+      new Request("https://validator/verdict", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ request_id: requestId, state, questions }),
+      }),
+    );
+    if (!res.ok) return null;
+    const body = (await res.json()) as { final?: unknown };
+    if (!isObject(body.final)) return null;
+    const final = body.final as Decision;
+    return Object.keys(questions).every((q) => typeof final[q] === "string") ? final : null;
+  } catch {
+    return null;
+  }
+}
+
+function sameDecision(a: Decision, b: Decision, questions: Questions): boolean {
+  return Object.keys(questions).every((q) => a[q] === b[q]);
+}
+
+function lazy<T>(f: () => Promise<T>): () => Promise<T> {
+  let p: Promise<T> | null = null;
+  return () => (p ??= f());
 }
 
 async function labels(request: Request, deps: Deps): Promise<Response> {

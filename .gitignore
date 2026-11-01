@@ -1,5 +1,6 @@
 node_modules
 dist/
+dist-validator/
 .wrangler/
 .dev.vars
 # Real decisions and reports stay local, even after redaction.

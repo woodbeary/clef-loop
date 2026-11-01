@@ -13,5 +13,5 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true
   },
-  "include": ["src", "scripts", "test"]
+  "include": ["src", "scripts", "test", "validator/server.ts", "validator/rules.ts"]
 }
