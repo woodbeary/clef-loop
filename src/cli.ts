@@ -23,6 +23,7 @@ const USAGE = `clef-loop: capture labeled decisions, redact, split, evaluate, de
                    [--clef-model @cf/cloudflare/clef-flash] [--names FILE] [--keep-keys a,b] [--allow-residual]
   clef-loop eval   --heldout DIR/clef/heldout.jsonl [--train DIR/clef/train.jsonl]
                    --arm NAME=KIND[:ARG] ... [--out DIR] [--concurrency 4] [--note TEXT] [--dry-run]
+                   [--abstain-below P]   route answers with top probability < P to a person
                    kinds: replay | majority | systemone:<model> | systemone-url:<url>
                           | lora:<model>|<finetune>|<template> | chat:<model>
   clef-loop lora check DIR [--model @cf/mistral/mistral-7b-instruct-v0.2-lora] [--set-model-type TYPE]
@@ -161,9 +162,12 @@ async function evalCmd(args: string[]): Promise<number> {
       note: { type: "string" },
       "run-id": { type: "string" },
       "dry-run": { type: "boolean", default: false },
+      "abstain-below": { type: "string" },
     },
   });
   if (!values.heldout) throw new Error("--heldout FILE is required");
+  const abstainBelow = values["abstain-below"] === undefined ? undefined : Number(values["abstain-below"]);
+  if (abstainBelow !== undefined && !(abstainBelow >= 0 && abstainBelow <= 1)) throw new Error("--abstain-below must be a probability in [0, 1]");
   if (!values.arm?.length) throw new Error("give at least one --arm");
   const heldOut = readClefJsonl(await readFile(values.heldout, "utf8"));
   const train = values.train ? readClefJsonl(await readFile(values.train, "utf8")) : undefined;
@@ -187,7 +191,7 @@ async function evalCmd(args: string[]): Promise<number> {
     gatewayId: process.env.AI_GATEWAY_ID ?? "clef-loop",
     urlToken: process.env.SYSTEMONE_URL_TOKEN,
   });
-  const report = await evaluate(heldOut, arms, { transport, train, concurrency: Number(values.concurrency), runId });
+  const report = await evaluate(heldOut, arms, { transport, train, concurrency: Number(values.concurrency), runId, abstainBelow });
   const md = renderMarkdown(report, values.note);
   if (values.out) {
     await mkdir(values.out, { recursive: true });

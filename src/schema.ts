@@ -69,47 +69,65 @@ export function validateDecision(decision: unknown, questions: Questions): strin
   return problems;
 }
 
+/** Per question, the probability the model gave each allowed option. */
+export type Probabilities = Record<string, Record<string, number>>;
+
+export interface Answer {
+  decision: Decision;
+  probs: Probabilities;
+}
+
 /**
  * Turns a System One response body ({ model, answers, usage }) into a Decision.
  * Throws with a reason when the answers don't match the questions, so callers can
  * fall back instead of acting on a malformed decision.
  */
 export function decisionFromSystemOne(body: unknown, questions: Questions): Decision {
+  return answerFromSystemOne(body, questions).decision;
+}
+
+/** Like decisionFromSystemOne, and keeps the probabilities for calibration and abstention. */
+export function answerFromSystemOne(body: unknown, questions: Questions): Answer {
   if (!isObject(body) || !isObject(body.answers)) throw new Error("response has no answers object");
   const answers = body.answers;
   const decision: Decision = {};
+  const probs: Probabilities = {};
   for (const [id, q] of Object.entries(questions)) {
     const a = answers[id];
     if (!isObject(a)) throw new Error(`no answer for "${id}"`);
+    const options = optionsFor(q);
     if (q.type === "choice") {
       if (typeof a.choice !== "string") throw new Error(`"${id}": choice answer has no choice`);
-      checkProbabilities(id, a.probabilities, optionsFor(q));
+      probs[id] = checkProbabilities(id, a.probabilities, options);
       decision[id] = a.choice;
     } else if (q.type === "noul") {
       if (typeof a.noul !== "number" || a.noul < 0 || a.noul > 1) throw new Error(`"${id}": noul must be a probability`);
+      probs[id] = { true: a.noul, false: 1 - a.noul };
       decision[id] = a.noul >= 0.5 ? "true" : "false";
     } else {
-      checkProbabilities(id, a.probabilities, optionsFor(q));
+      probs[id] = checkProbabilities(id, a.probabilities, options);
       // The decision is the most likely level; `score` itself is a weighted mean and
       // can land between levels.
-      const probs = a.probabilities as Record<string, number>;
-      decision[id] = Object.entries(probs).sort((x, y) => y[1] - x[1])[0][0];
+      decision[id] = Object.entries(probs[id]).sort((x, y) => y[1] - x[1])[0][0];
     }
   }
   const problems = validateDecision(decision, questions);
   if (problems.length) throw new Error(problems.join("; "));
-  return decision;
+  return { decision, probs };
 }
 
-function checkProbabilities(id: string, probs: unknown, options: string[]): void {
+function checkProbabilities(id: string, probs: unknown, options: string[]): Record<string, number> {
   if (!isObject(probs)) throw new Error(`"${id}": probabilities missing`);
+  const out: Record<string, number> = Object.fromEntries(options.map((o) => [o, 0]));
   let sum = 0;
   for (const [k, v] of Object.entries(probs)) {
     if (!options.includes(k)) throw new Error(`"${id}": unknown option "${k}" in probabilities`);
     if (typeof v !== "number" || v < 0 || v > 1) throw new Error(`"${id}": probability for "${k}" is not in [0, 1]`);
+    out[k] = v;
     sum += v;
   }
   if (Math.abs(sum - 1) > 0.01) throw new Error(`"${id}": probabilities sum to ${sum.toFixed(3)}, not 1`);
+  return out;
 }
 
 export function isObject(v: unknown): v is Record<string, Json> {

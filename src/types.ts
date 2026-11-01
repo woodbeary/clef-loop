@@ -94,5 +94,8 @@ export type TemplateName = "mistral" | "gemma" | "llama2";
 
 /** The result of running one arm on one record. */
 export type ArmOutcome =
-  | { ok: true; decision: Decision; ms: number }
-  | { ok: false; error: string; ms: number };
+  | { ok: true; decision: Decision; ms: number; probs?: Record<string, Record<string, number>> }
+  | { ok: false; error: string; ms: number; kind?: FailureKind };
+
+/** `call`: the request failed (network, status, timeout). `format`: the model answered, but not with an allowed option. */
+export type FailureKind = "call" | "format";

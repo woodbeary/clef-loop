@@ -3,7 +3,7 @@
 // sends them through the AI binding. Both use the same builders and parsers, so the
 // eval measures exactly what production runs.
 
-import { decisionFromSystemOne, isObject, optionsFor, validateDecision } from "./schema.ts";
+import { answerFromSystemOne, isObject, optionsFor, validateDecision, type Probabilities } from "./schema.ts";
 import type { ArmSpec, Decision, Json, Questions, TemplateName } from "./types.ts";
 
 /** A request to send. `workers-ai` goes to env.AI.run(model, input) or POST /ai/run/{model}. */
@@ -56,21 +56,37 @@ export function buildCall(arm: CallableArm, state: Json, questions: Questions): 
 
 /** Reads a decision from a model's raw result. Throws when it can't, which counts as a miss. */
 export function parseResult(arm: CallableArm, raw: unknown, questions: Questions): Decision {
+  return parseAnswer(arm, raw, questions).decision;
+}
+
+/** Thrown when a model answered but the answer isn't an allowed option. */
+export class FormatError extends Error {}
+
+/** The decision, plus per-option probabilities when the arm returns them (System One arms do; text arms don't). */
+export function parseAnswer(arm: CallableArm, raw: unknown, questions: Questions): { decision: Decision; probs?: Probabilities } {
+  try {
+    return parseAnswerUnchecked(arm, raw, questions);
+  } catch (e) {
+    throw new FormatError((e as Error).message);
+  }
+}
+
+function parseAnswerUnchecked(arm: CallableArm, raw: unknown, questions: Questions): { decision: Decision; probs?: Probabilities } {
   switch (arm.kind) {
     case "systemone":
     case "systemone-url":
-      return decisionFromSystemOne(raw, questions);
+      return answerFromSystemOne(raw, questions);
     case "lora": {
       const text = isObject(raw) && typeof raw.response === "string" ? raw.response : undefined;
       if (text === undefined) throw new Error("text model result has no `response` string");
-      return parseAnswerText(text, questions);
+      return { decision: parseAnswerText(text, questions) };
     }
     case "chat": {
       const choices = isObject(raw) && Array.isArray(raw.choices) ? raw.choices : [];
       const first = choices[0];
       const msg = isObject(first) && isObject(first.message) ? first.message : undefined;
       if (!msg || typeof msg.content !== "string") throw new Error("chat result has no message content");
-      return parseAnswerText(msg.content, questions);
+      return { decision: parseAnswerText(msg.content, questions) };
     }
   }
 }
