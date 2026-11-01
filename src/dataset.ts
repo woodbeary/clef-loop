@@ -2,8 +2,9 @@
 //
 // Outputs (all derived from the same redacted split):
 //   clef/train.jsonl, clef/heldout.jsonl
-//     One System One request per line plus the human's label:
-//     {"id", "created_at", "request": {"model", "state", "questions"}, "label": {...}}
+//     One System One request per line plus the label and who made it:
+//     {"id", "created_at", "request": {"model", "state", "questions"}, "label": {...},
+//      "decided_by", "decided_at", "saw_suggestion", "tenant"?}
 //     `request` is exactly the documented Clef input (schema-input.json), so it can
 //     be replayed against Clef, a BYOM deployment or a self-hosted SGLang server.
 //     Cloudflare has not published an upload format for Clef fine-tuning (the RL
@@ -18,6 +19,7 @@
 
 import { answerText, decisionPrompt, defaultSelector, renderTraining } from "./arms.ts";
 import { toCsv } from "./csv.ts";
+import { decider } from "./capture.ts";
 import { auditResidual, redactJson, type RedactOptions, type RedactionCounts, type ResidualFinding } from "./redact.ts";
 import { labelCounts, split, type SplitResult } from "./split.ts";
 import type { DecisionRecord, TemplateName } from "./types.ts";
@@ -73,6 +75,10 @@ export function build(records: DecisionRecord[], opts: BuildOptions): BuildOutpu
       created_at: r.createdAt,
       request: { model: selector, state: r.state, questions: r.questions },
       label: r.final,
+      decided_by: r.decidedBy,
+      decided_at: r.decidedAt,
+      saw_suggestion: r.sawSuggestion,
+      ...(r.tenant ? { tenant: r.tenant } : {}),
       ...(r.modelOutput ? { logged_output: r.modelOutput } : {}),
     });
   const files: Record<string, string> = {
@@ -87,7 +93,7 @@ export function build(records: DecisionRecord[], opts: BuildOptions): BuildOutpu
   const range = (rs: DecisionRecord[]) => (rs.length ? { from: rs[0].createdAt, to: rs[rs.length - 1].createdAt } : null);
   const manifest = {
     tool: "clef-loop",
-    version: "0.1.0",
+    version: "0.2.0",
     clef_model: opts.clefModel,
     lora_template: opts.template,
     counts: {
@@ -99,12 +105,21 @@ export function build(records: DecisionRecord[], opts: BuildOptions): BuildOutpu
     },
     time: { train: range(s.train), heldout: range(s.heldOut), cutoff: s.cutoff },
     labels: { train: labelCounts(s.train), heldout: labelCounts(s.heldOut) },
+    decided_by: tally([...s.train, ...s.heldOut].map((r) => r.decidedBy)),
+    saw_suggestion: tally([...s.train, ...s.heldOut].filter((r) => r.decidedBy === "human").map((r) => String(r.sawSuggestion))),
+    tenants: tally([...s.train, ...s.heldOut].map((r) => r.tenant ?? "(none)")),
     redactions: red.counts,
     residual_pii_findings: red.residual.length,
     sources: [...new Set(records.map((r) => r.source))],
   };
   files["manifest.json"] = JSON.stringify(manifest, null, 2) + "\n";
   return { files, split: s, redactions: red.counts, residual: red.residual };
+}
+
+function tally(values: string[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const v of values) out[v] = (out[v] ?? 0) + 1;
+  return out;
 }
 
 /** Reads clef/heldout.jsonl (or clef/train.jsonl) back into records. */
@@ -115,12 +130,20 @@ export function readClefJsonl(text: string): DecisionRecord[] {
     .map((line, i) => {
       const o = JSON.parse(line);
       if (!o.request?.questions || !o.label) throw new Error(`line ${i + 1}: missing request.questions or label`);
+      let who: ReturnType<typeof decider>;
+      try {
+        who = decider(o.decided_by, o.decided_at, o.saw_suggestion);
+      } catch (e) {
+        throw new Error(`line ${i + 1}: ${(e as Error).message} (datasets built before clef-loop 0.2 have no decided_by; rebuild them)`);
+      }
       return {
         id: String(o.id),
         createdAt: String(o.created_at),
         state: o.request.state,
         questions: o.request.questions,
         final: o.label,
+        ...who,
+        ...(typeof o.tenant === "string" ? { tenant: o.tenant } : {}),
         ...(o.logged_output ? { modelOutput: o.logged_output } : {}),
         source: "dataset" as const,
       };

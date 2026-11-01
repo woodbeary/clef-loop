@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { buildCall, isTemplate, type CallableArm } from "./arms.ts";
 import { byomPlan, checkCog } from "./byom.ts";
-import { captureFromCsv, captureFromGateway, type CaptureResult } from "./capture.ts";
+import { applyConsent, captureFromCsv, captureFromGateway, parseConsent, workerLabels, type CaptureResult } from "./capture.ts";
 import { restTransport } from "./cloudflare.ts";
 import { build, readClefJsonl, redactRecords } from "./dataset.ts";
 import { evaluate, parseArm, renderMarkdown } from "./evaluate.ts";
@@ -17,8 +17,9 @@ import type { Questions } from "./types.ts";
 
 const USAGE = `clef-loop: capture labeled decisions, redact, split, evaluate, deploy.
 
-  clef-loop audit  (--csv FILE --questions FILE | --gateway ID [--limit N]) [--names FILE] [--sample N]
-  clef-loop build  (--csv FILE --questions FILE | --gateway ID [--limit N]) --out DIR
+  clef-loop audit  (--csv FILE --questions FILE | --gateway ID --labels-from URL [--limit N]) [--consent FILE]
+                   [--names FILE] [--sample N]
+  clef-loop build  (--csv FILE --questions FILE | --gateway ID --labels-from URL [--limit N]) [--consent FILE] --out DIR
                    [--heldout N|FRACTION] [--template mistral|gemma|llama2]
                    [--clef-model @cf/cloudflare/clef-flash] [--names FILE] [--keep-keys a,b] [--allow-residual]
   clef-loop eval   --heldout DIR/clef/heldout.jsonl [--train DIR/clef/train.jsonl]
@@ -30,8 +31,12 @@ const USAGE = `clef-loop: capture labeled decisions, redact, split, evaluate, de
   clef-loop lora upload DIR --model MODEL --name NAME [--execute]
   clef-loop byom check [DIR]
 
+  --gateway needs --consent FILE ({"tenants": {"<id>": {"from": ISO, "until"?: ISO}}}) and
+  --labels-from URL (the canary Worker; labels are joined to logs by request id). With --csv,
+  --consent keeps only rows whose tenant column it covers.
+
 Environment: CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, AI_GATEWAY_ID (default clef-loop),
-SYSTEMONE_URL_TOKEN (optional, for systemone-url arms).`;
+CLEF_LOOP_TOKEN (for --labels-from), SYSTEMONE_URL_TOKEN (optional, for systemone-url arms).`;
 
 async function main(argv: string[]): Promise<number> {
   const [cmd, sub, ...rest] = argv;
@@ -61,6 +66,8 @@ const SOURCE_OPTIONS = {
   limit: { type: "string" },
   names: { type: "string" },
   "keep-keys": { type: "string" },
+  consent: { type: "string" },
+  "labels-from": { type: "string" },
 } as const;
 
 async function capture(values: Record<string, string | boolean | string[] | undefined>): Promise<CaptureResult> {
@@ -69,15 +76,21 @@ async function capture(values: Record<string, string | boolean | string[] | unde
     const problems = validateQuestions(questions);
     if (problems.length) throw new Error(`--questions: ${problems.join("; ")}`);
   }
+  const consent = values.consent ? parseConsent(await readFile(String(values.consent), "utf8")) : undefined;
   if (values.csv) {
     if (!questions) throw new Error("--csv needs --questions (a JSON file of the question schema)");
-    return captureFromCsv(await readFile(String(values.csv), "utf8"), questions);
+    const captured = captureFromCsv(await readFile(String(values.csv), "utf8"), questions);
+    return consent ? applyConsent(captured, consent) : captured;
   }
   if (values.gateway) {
+    if (!consent) throw new Error("--gateway needs --consent FILE: logs are exported only for tenants who opted in");
+    if (!values["labels-from"]) throw new Error("--gateway needs --labels-from URL (the canary Worker that stores the labels)");
     return captureFromGateway({
       accountId: requireEnv("CLOUDFLARE_ACCOUNT_ID"),
       apiToken: requireEnv("CLOUDFLARE_API_TOKEN"),
       gatewayId: String(values.gateway),
+      consent,
+      labels: workerLabels({ url: String(values["labels-from"]), token: requireEnv("CLEF_LOOP_TOKEN") }),
       limit: values.limit ? Number(values.limit) : undefined,
       questions,
     });
@@ -97,7 +110,7 @@ async function audit(args: string[]): Promise<number> {
   const { values } = parseArgs({ args, options: { ...SOURCE_OPTIONS, sample: { type: "string" } } });
   const captured = await capture(values);
   const red = redactRecords(captured.records, await redactOptions(values));
-  console.log(`records: ${red.records.length}, skipped: ${captured.skipped.length}`);
+  console.log(`records: ${red.records.length}, skipped: ${captured.skipped.length}${captured.unlabeled === undefined ? "" : `, unlabeled: ${captured.unlabeled}`}`);
   for (const s of captured.skipped.slice(0, 10)) console.log(`  skipped ${s.id}: ${s.reason}`);
   console.log(`redactions: ${JSON.stringify(red.counts)}`);
   console.log(`residual findings: ${red.residual.length}`);
@@ -123,6 +136,7 @@ async function buildCmd(args: string[]): Promise<number> {
   if (!isTemplate(values.template)) throw new Error("--template must be mistral, gemma or llama2");
   const captured = await capture(values);
   for (const s of captured.skipped) console.error(`skipped ${s.id}: ${s.reason}`);
+  if (captured.records.length === 0) throw new Error(`no records left to build from (${captured.skipped.length} skipped; reasons above)`);
   const out = build(captured.records, {
     heldOut: Number(values.heldout),
     template: values.template,

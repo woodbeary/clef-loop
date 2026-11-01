@@ -77,4 +77,22 @@ describe("build", () => {
     const out = build(records, { heldOut: 5, template: "mistral", clefModel: "@cf/cloudflare/clef-flash", redact: {}, allowResidual: true });
     assert.ok(out.residual.length > 0);
   });
+
+  it("keeps who decided, when, and whether they saw the suggestion, and refuses datasets without them", async () => {
+    const records = await fixtureRecords();
+    const out = build(records, { heldOut: 60, template: "mistral", clefModel: "@cf/cloudflare/clef-flash", redact: { names: FAKE_NAMES } });
+    const line = JSON.parse(out.files["clef/train.jsonl"].split("\n")[0]);
+    assert.equal(line.decided_by, "human");
+    assert.ok(Date.parse(line.decided_at) >= Date.parse(line.created_at));
+    assert.equal(typeof line.saw_suggestion, "boolean");
+    const m = JSON.parse(out.files["manifest.json"]);
+    assert.equal(m.version, "0.2.0");
+    assert.deepEqual(m.decided_by, { human: m.counts.train + m.counts.heldout });
+    assert.equal(m.saw_suggestion.true + m.saw_suggestion.false, m.counts.train + m.counts.heldout);
+    const back = readClefJsonl(out.files["clef/heldout.jsonl"]);
+    assert.ok(back.every((r) => r.decidedBy === "human" && typeof r.sawSuggestion === "boolean"));
+    const v01 = JSON.stringify({ id: "x", created_at: "2026-09-01T00:00:00Z", request: { model: "clef-flash", state: "s", questions: QUESTIONS }, label: { decision: "skip" } });
+    assert.throws(() => readClefJsonl(v01), /decided_by.*rebuild them/);
+  });
 });
+

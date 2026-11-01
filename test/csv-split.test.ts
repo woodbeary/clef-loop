@@ -30,7 +30,7 @@ describe("csv", () => {
 });
 
 function rec(id: string, at: string, state: string, label: string): DecisionRecord {
-  return { id, createdAt: at, state, questions: QUESTIONS, final: { decision: label }, source: "csv" };
+  return { id, createdAt: at, state, questions: QUESTIONS, final: { decision: label }, decidedBy: "human", decidedAt: at, sawSuggestion: false, source: "csv" };
 }
 
 describe("split", () => {

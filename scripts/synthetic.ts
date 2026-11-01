@@ -2,7 +2,8 @@
 // address and card number here is fake: emails use example.com (RFC 2606), phone
 // numbers use the 555-01XX fiction range, and the card is a public test number.
 //
-// The "human" labels follow a fixed rule plus 4% noise. The "logged model output"
+// The "human" labels follow a fixed rule plus 4% noise, each with a decision time a few
+// minutes to two hours later and whether the person saw the model's suggestion first. The "logged model output"
 // follows a weaker rule, standing in for what a base model said at the time. Neither
 // is a real model; numbers computed on this data test the pipeline, nothing more.
 
@@ -71,6 +72,7 @@ function loggedRule(l: Lead, r: () => number): string {
 
 export function syntheticLeads(n = 300, seed = 20261031): DecisionRecord[] {
   const r = prng(seed);
+  const who = prng(seed + 1);
   const pick = <T>(xs: T[]): T => xs[Math.floor(r() * xs.length)];
   const out: DecisionRecord[] = [];
   let t = Date.parse("2026-08-01T15:00:00Z");
@@ -113,6 +115,9 @@ export function syntheticLeads(n = 300, seed = 20261031): DecisionRecord[] {
       questions: QUESTIONS,
       modelOutput,
       final,
+      decidedBy: "human",
+      decidedAt: new Date(t + Math.floor((5 + who() * 115) * 60_000)).toISOString(),
+      sawSuggestion: who() < 0.5,
       source: "csv",
     });
   }
@@ -120,7 +125,7 @@ export function syntheticLeads(n = 300, seed = 20261031): DecisionRecord[] {
   for (const k of [10, 50, 90]) {
     const src = out[k];
     t += 3600_000;
-    out.push({ ...src, id: `${src.id}-dup`, createdAt: new Date(t).toISOString() });
+    out.push({ ...src, id: `${src.id}-dup`, createdAt: new Date(t).toISOString(), decidedAt: new Date(t + 600_000).toISOString() });
   }
   return out;
 }

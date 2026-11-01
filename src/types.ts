@@ -47,8 +47,16 @@ export interface DecisionRecord {
   questions: Questions;
   /** The answer the production model gave at the time, if it was logged. */
   modelOutput?: Decision;
-  /** The human's final decision. This is the label. */
+  /** The final decision: a person's call or a validator's verdict, never the model's own answer. This is the label. */
   final: Decision;
+  /** Who made the final decision. Agent-made labels are refused at capture. */
+  decidedBy: "human" | "validator";
+  /** ISO 8601 time the final decision was made. */
+  decidedAt: string;
+  /** Whether the person saw the model's suggestion before deciding. Always false for a validator. */
+  sawSuggestion: boolean;
+  /** The tenant whose consent covers this record, when it came through the canary Worker. */
+  tenant?: string;
   /** Where the record came from, for the manifest. */
   source: "csv" | "ai-gateway" | "dataset";
 }

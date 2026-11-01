@@ -56,7 +56,7 @@ describe("frontier arm with structured output", () => {
 describe("report says what each arm is", () => {
   it("labels a self-hosted tuned arm as evaluated offline, and names the chat format", async () => {
     const records: DecisionRecord[] = [
-      { id: "a", createdAt: "2026-10-01T00:00:00.000Z", state: STATE, questions: QUESTIONS, final: { decision: "accept" }, source: "dataset" },
+      { id: "a", createdAt: "2026-10-01T00:00:00.000Z", state: STATE, questions: QUESTIONS, final: { decision: "accept" }, decidedBy: "human", decidedAt: "2026-10-01T00:05:00.000Z", sawSuggestion: false, source: "dataset" },
     ];
     const transport: Transport = {
       async send(call) {

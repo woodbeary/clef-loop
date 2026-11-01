@@ -9,8 +9,8 @@ import { FAKE_NAMES, QUESTIONS, syntheticLeads } from "./synthetic.ts";
 export function fixtureFiles(): Record<string, string> {
   const leads = syntheticLeads();
   const csv = toCsv(
-    ["id", "created_at", "state", "model_output", "final"],
-    leads.map((l) => [l.id, l.createdAt, JSON.stringify(l.state), l.modelOutput!.decision, l.final.decision]),
+    ["id", "created_at", "state", "model_output", "final", "decided_by", "decided_at", "saw_suggestion"],
+    leads.map((l) => [l.id, l.createdAt, JSON.stringify(l.state), l.modelOutput!.decision, l.final.decision, l.decidedBy, l.decidedAt, String(l.sawSuggestion)]),
   );
   const sample = {
     model: "clef-flash",
